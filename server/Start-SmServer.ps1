@@ -154,5 +154,14 @@ Register-SmAdServerPage -Ui $ui -JobModules $adJobModules -AddLog { param($m) Ad
 Register-SmDnsServerPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Register-SmDhcpServerPage -Ui $ui -JobModules $dhcpJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Select-SmPage 'Start'
+# Verwaiste Arbeitsordner frueherer Laeufe (aelter als 24 h, nur Besitzer Administratoren/SYSTEM) wegraeumen
+try {
+    $orphans = [int](Clear-SmDhcpOrphans) + [int](Clear-SmPrintOrphans) + [int](Clear-SmDnsOrphans)
+    if ($orphans) { Add-Log ('Verwaiste Arbeitsordner frueherer Laeufe geloescht: {0}' -f $orphans) }
+}
+catch { Add-Log ('Aufraeumen verwaister Arbeitsordner: ' + $_.Exception.Message) }
 Update-Share
 [void]$w.Window.ShowDialog()
+# Fenster geschlossen: Arbeitsordner dieser Sitzung aufraeumen (Handles zu, Import-/Export-Ordner weg)
+try { Close-SmDhcpPage } catch { }
+try { Close-SmPrintPage } catch { }

@@ -304,6 +304,22 @@ Remove-Item -LiteralPath $fremd -Recurse -Force
 New-Item -ItemType Directory -Force (Join-Path $Work ('Import-' + ('a' * 32))) | Out-Null
 Remove-SmPrintWork (Join-Path $Work ('Import-' + ('a' * 32)))
 Check 'Aufraeumen: richtiger Name ausserhalb des Sicherungsordners wird nicht geloescht' (Test-Path (Join-Path $Work ('Import-' + ('a' * 32))))
+# Beenden und Start: Arbeitsverzeichnis der Sitzung weg, verwaiste (aelter als 24 h, eigener Name und Besitzer) weg
+$sess = Join-Path $made ('Import-' + ('d' * 32)); New-Item -ItemType Directory -Force $sess | Out-Null
+$script:SmPS = @{ Plan = [pscustomobject]@{ WorkRoot = $sess } }
+Close-SmPrintPage
+$closeErr = $false; try { $script:SmPS = $null; Close-SmPrintPage } catch { $closeErr = $true }
+Check 'Fenster schliessen: Arbeitsverzeichnis des Imports geloescht, ohne Sitzung kein Fehler' (-not (Test-Path $sess) -and -not $closeErr)
+$orA = Join-Path $made ('Import-' + ('1' * 32)); $orB = Join-Path $made ('Import-' + ('2' * 32)); $orC = Join-Path $made 'Import-fremd'
+foreach ($d in $orA, $orB, $orC) { New-Item -ItemType Directory -Force $d | Out-Null }
+(Get-Item $orA).LastWriteTime = (Get-Date).AddHours(-30); (Get-Item $orC).LastWriteTime = (Get-Date).AddHours(-30)
+$nPr = Clear-SmPrintOrphans
+Check 'Start: verwaistes Import-Verzeichnis (aelter als 24 h) geloescht, neues und fremd benanntes bleiben' ($nPr -eq 1 -and -not (Test-Path $orA) -and (Test-Path $orB) -and (Test-Path $orC))
+Remove-Item -LiteralPath $orB, $orC -Recurse -Force
+$tmpD = Join-Path $Work 'dnstemp'; New-Item -ItemType Directory -Force $tmpD | Out-Null
+$dA = Join-Path $tmpD ('ServerMigration-dns-' + ('3' * 32)); $dB = Join-Path $tmpD 'Eigene-Daten'
+foreach ($d in $dA, $dB) { New-Item -ItemType Directory -Force $d | Out-Null; (Get-Item $d).LastWriteTime = (Get-Date).AddHours(-30) }
+Check 'Start: verwaister DNS-Temp-Ordner geloescht, fremder Ordner bleibt' ((Clear-SmDnsOrphans -TempRoot $tmpD) -eq 1 -and -not (Test-Path $dA) -and (Test-Path $dB))
 $qfile = Join-Path $stubDir 'q-out.txt'
 [IO.File]::WriteAllText($qfile, "Printer: HP-Buero-1`r`nPrinter: Kyocera-Flur`r`nDriver: HP Universal`r`nPort: IP_10.0.0.5`r`n")
 $env:SM_STUB_Q = $qfile

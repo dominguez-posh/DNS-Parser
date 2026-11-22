@@ -340,6 +340,18 @@ function Remove-SmPrintWork {
     }
 }
 
+function Clear-SmPrintOrphans {
+    <# Start des Server-Fensters: verwaiste Import-<GUID>-Arbeitsordner im Sicherungsordner (aelter als 24 h, Besitzer Administratoren oder SYSTEM) loeschen. #>
+    Remove-SmWorkOrphans -Root (Get-SmPrintFolder) -NamePattern $script:SmPrintWorkPattern
+}
+
+function Close-SmPrintPage {
+    <# Beim Schliessen des Server-Fensters: Arbeitsverzeichnis des laufenden Imports dieser Sitzung loeschen (der naechste Start raeumt Reste auf). #>
+    $st = $script:SmPS
+    if (-not $st) { return }
+    try { if ($st.Plan -and $st.Plan.WorkRoot) { Remove-SmPrintWork $st.Plan.WorkRoot; $st.Plan = $null } } catch { }
+}
+
 function Read-SmPrintExportContent {
     <# Inhalt der Exportdatei, soweit lesbar: PrintBrm -Q -F <datei> (Abfrage der Sicherungsdatei). Liefert Ok, ExitCode und Lines (gekuerzt, nur Text). #>
     param([Parameter(Mandatory)][string]$File)

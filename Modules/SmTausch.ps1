@@ -151,6 +151,64 @@ function Receive-SmShareFile {
     finally { $resp.Close() }
 }
 
+function Get-SmShareBytes {
+    <#
+    .SYNOPSIS
+        Laedt eine Datei aus dem Tauschordner in den Speicher, ohne dass vorher unbegrenzt Daten ankommen.
+    .DESCRIPTION
+        Weiterleitungen folgt die Funktion selbst (AllowAutoRedirect = false, hoechstens 5): Jedes Ziel wird mit Test-SmFinalHost geprueft, bevor es
+        angefragt wird. Die Laengenangabe im Kopf und die tatsaechlich gelesenen Bytes werden gegen MaxBytes geprueft (Abbruch beim Ueberschreiten).
+        Die Texte werden vom Aufrufer vorgegeben, damit keine Adresse in einer Meldung landet.
+    #>
+    param(
+        [Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$Uri, [Parameter(Mandatory)][long]$MaxBytes,
+        [string]$Accept = 'application/octet-stream', [string]$DeniedText = 'Die Antwort kam von einem unerlaubten Ziel (erlaubt: https auf *.sharepoint.com). Abgebrochen.',
+        [string]$TooLargeText = 'Die Antwort ist groesser als das Limit.'
+    )
+    Initialize-SmWeb
+    $cur = [uri]$Uri
+    for ($hop = 0; $hop -le 5; $hop++) {
+        if (-not (Test-SmFinalHost -Final $cur -Authority ([string]$Share.Authority) -AnyHost:([bool]$Share.AnyHost))) { throw $DeniedText }
+        $req = [Net.HttpWebRequest][Net.WebRequest]::Create($cur)
+        $req.Method = 'GET'; $req.Accept = $Accept; $req.AllowAutoRedirect = $false
+        $req.Timeout = 120000; $req.ReadWriteTimeout = 120000
+        if ($Share.Session) {
+            if ($Share.Session.Cookies) { $req.CookieContainer = $Share.Session.Cookies }
+            if ($Share.Session.UserAgent) { $req.UserAgent = $Share.Session.UserAgent }
+        }
+        try { $resp = $req.GetResponse() }
+        catch [Net.WebException] {
+            if (-not $_.Exception.Response) { throw ('Keine Antwort vom Tauschordner (' + $_.Exception.Status + ').') }
+            $resp = $_.Exception.Response
+        }
+        try {
+            $code = [int]$resp.StatusCode
+            if ($code -ge 300 -and $code -lt 400) {
+                $loc = [string]$resp.Headers['Location']
+                if (-not $loc) { throw 'Weiterleitung ohne Ziel.' }
+                $cur = New-Object Uri($cur, $loc)
+                continue
+            }
+            if ($code -lt 200 -or $code -ge 300) { throw ('Der Tauschordner antwortet mit HTTP ' + $code + '.') }
+            if ($resp.ContentLength -gt $MaxBytes) { throw $TooLargeText }
+            $src = $resp.GetResponseStream()
+            $ms = New-Object IO.MemoryStream
+            try {
+                $buf = New-Object byte[] (1MB); $total = 0L
+                while (($n = $src.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $total += $n
+                    if ($total -gt $MaxBytes) { throw $TooLargeText }
+                    $ms.Write($buf, 0, $n)
+                }
+                return , $ms.ToArray()
+            }
+            finally { $src.Dispose(); $ms.Dispose() }
+        }
+        finally { $resp.Close() }
+    }
+    throw 'Zu viele Weiterleitungen.'
+}
+
 function Get-SmChunkPlan {
     <#
     .SYNOPSIS

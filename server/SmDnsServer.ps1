@@ -83,6 +83,37 @@ function Protect-SmDnsStateDir {
     if ($bad.Count) { throw ('Der Sicherungsordner ist nicht sicher, abgebrochen: ' + ($bad -join ' ')) }
 }
 
+function Remove-SmWorkOrphans {
+    <#
+    Loescht verwaiste Arbeitsordner (Name passt auf NamePattern, aelter als MinAge, Besitzer nur Administratoren oder SYSTEM, keine Verknuepfung).
+    Gedacht fuer den Start des Server-Fensters: Ordner, die ein frueherer Lauf nicht aufgeraeumt hat (Absturz, Fenster waehrend eines Jobs geschlossen).
+    Fremde Ordner (anderer Besitzer, anderer Name) bleiben unberuehrt. Liefert die Zahl der geloeschten Ordner.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$NamePattern, [timespan]$MinAge = [timespan]::FromHours(24), [string[]]$AllowedSids = (Get-SmDnsStateSids))
+    $n = 0
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $n }
+    if ((Get-Item -LiteralPath $Root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $n }
+    foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue)) {
+        try {
+            if ($d.Name -notmatch $NamePattern) { continue }
+            if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if (((Get-Date) - $d.LastWriteTime) -lt $MinAge) { continue }
+            try { $owner = (Get-Acl -LiteralPath $d.FullName).GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { continue }
+            if ($owner -notin $AllowedSids) { continue }
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop
+            $n++
+        }
+        catch { }   # in Benutzung oder keine Rechte: bleibt stehen, der naechste Start versucht es wieder
+    }
+    $n
+}
+
+function Clear-SmDnsOrphans {
+    <# Start des Server-Fensters: verwaiste ServerMigration-dns-<GUID>-Ordner unter %TEMP% (Reste eines geschlossenen Fensters mitten im Upload), aelter als 24 h. Der Upload selbst raeumt in finally auf. #>
+    param([string]$TempRoot = $env:TEMP)
+    Remove-SmWorkOrphans -Root $TempRoot -NamePattern '^ServerMigration-dns-[0-9a-f]{32}$'
+}
+
 function ConvertTo-SmDnsMaxBytes {
     <# MB (Oberflaeche) -> Byte (MaxMBFileSize). Wirft, wenn der Wert nicht in uint32 passt (unter 4 GB). #>
     param([Parameter(Mandatory)][long]$MB)

@@ -405,6 +405,8 @@ try { [void](New-Item -ItemType Junction -Path $jn -Target $jt) } catch { }
 if (Test-Path $jn) {
     Reset-Calls
     Check 'Verknuepfung: als Sicherungsordner, als Importordner und bei Assert abgelehnt, nichts importiert' ((Throws { Invoke-SmDhcpImport -Opened $op -Plan $plan -BackupRoot $jn }) -and (Calls 'Import-DhcpServer').Count -eq 0 -and (Throws { Receive-SmDhcpExport -Share ([pscustomobject]@{}) -Remote $remote -ImportRoot $jn }) -and (Throws { Assert-SmDhcpNoReparse -Path $jn }))
+    Reset-Calls
+    Check 'Export: Arbeitsordner als Verknuepfung abgelehnt, nichts exportiert' ((Throws { Publish-SmDhcpExport -Share ([pscustomobject]@{}) -WorkRoot $jn }) -and (Throws { Publish-SmDhcpAfter -Share ([pscustomobject]@{}) -WorkRoot $jn }) -and (Calls 'Export-DhcpServer').Count -eq 0 -and @(Get-ChildItem -LiteralPath $jt -Force).Count -eq 0)
     [IO.Directory]::Delete($jn)
 }
 else { Write-Host 'INFO Junction konnte nicht angelegt werden, Test uebersprungen' -ForegroundColor Yellow }
@@ -473,8 +475,89 @@ Check 'Download: abweichende Groesse abgelehnt, Temp aufgeraeumt' ((Throws { Rec
 Close-SmDhcpImport -Down $down -Opened $op
 Check 'Aufraeumen: nur eigene Ordner (Ordner ausserhalb bleibt)' (-not (Test-Path $down.Dir))
 $foreign = Join-Path $Work 'fremd'; New-Item -ItemType Directory $foreign | Out-Null
-Remove-SmDhcpTemp -Dir $foreign -TempRoot $tmpRoot
+Remove-SmDhcpWorkDir -Dir $foreign -Root $tmpRoot
 Check 'Aufraeumen: fremder Ordner wird nicht geloescht' (Test-Path $foreign)
+
+# ---------------------------------------------------------------- Nachpruefung: Export im gehaerteten Ordner, SHA256 ueber die hochgeladenen Bytes, Aufraeumen, Protokoll
+$script:M = New-OldServer; Reset-Calls
+$keepSend = ${function:Send-SmShareFile}
+function Send-SmShareFile { param($Share, [string]$Path, [scriptblock]$Progress)
+    $script:Probe = @{ Dir = (Split-Path -Parent $Path); WriteBlocked = $false; ReadOk = $false; Sha = '' }
+    try { [IO.File]::Open($Path, 'Open', 'Write', 'Read').Dispose() } catch { $script:Probe.WriteBlocked = $true }
+    try { [IO.File]::Open($Path, 'Open', 'Read', 'Read').Dispose(); $script:Probe.ReadOk = $true } catch { }
+    $script:Probe.Sha = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    & $keepSend -Share $Share -Path $Path -Progress $Progress }
+$oldPd = $env:ProgramData; $env:ProgramData = Join-Path $Work 'pd'
+try {
+    $pubL = Publish-SmDhcpExport -Share ([pscustomobject]@{})
+    $pdRoot = Join-Path (Join-Path $Work 'pd') 'ServerMigration\Dhcp'
+    Check 'Export: Arbeitsordner Dhcp\Export-<GUID> unter ProgramData\ServerMigration, nicht unter %TEMP%' ((Split-Path -Leaf (Split-Path -Parent $script:Probe.Dir)) -eq "Dhcp" -and (Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $script:Probe.Dir))) -eq "ServerMigration" -and (Split-Path -Leaf $script:Probe.Dir) -match '^Export-[0-9a-f]{32}$' -and -not (Split-Path -Leaf $script:Probe.Dir).StartsWith('ServerMigration-dhcp-'))
+    Check 'Export: Ordner gehaertet (Besitzer und Zugriffsliste)' (@(Test-SmDnsStateDirAcl -Path $pdRoot).Count -eq 0)
+    Check 'Export: waehrend des Hochladens ist die ZIP gegen Schreiben gesperrt, Lesen geht' ($script:Probe.WriteBlocked -and $script:Probe.ReadOk)
+    Check 'Export: SHA256 stimmt mit den hochgeladenen Bytes ueberein' ($pubL.Sha256 -eq $script:Probe.Sha -and $pubL.Sha256 -eq (Get-FileHash -LiteralPath (Join-Path $store $pubL.Name) -Algorithm SHA256).Hash)
+    Check 'Export: Arbeitsordner danach aufgeraeumt' (-not (Test-Path -LiteralPath $script:Probe.Dir) -and @(Get-ChildItem -LiteralPath $pdRoot -Force).Count -eq 0)
+    $pubA = Publish-SmDhcpAfter -Share ([pscustomobject]@{}) -NoLeases
+    Check 'Stand hochladen: ebenfalls im gehaerteten Ordner, gesperrt, SHA256 ueber die hochgeladenen Bytes, aufgeraeumt' ($script:Probe.WriteBlocked -and (Split-Path -Leaf (Split-Path -Parent $script:Probe.Dir)) -eq "Dhcp" -and (Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $script:Probe.Dir))) -eq "ServerMigration" -and $pubA.Sha256 -eq $script:Probe.Sha -and -not (Test-Path -LiteralPath $script:Probe.Dir))
+    # Fehler beim Hochladen: Arbeitsordner trotzdem weg
+    function Send-SmShareFile { param($Share, [string]$Path, [scriptblock]$Progress) throw 'Netz weg' }
+    Check 'Export: Fehler beim Hochladen, Arbeitsordner trotzdem aufgeraeumt' ((Throws { Publish-SmDhcpExport -Share ([pscustomobject]@{}) }) -and @(Get-ChildItem -LiteralPath $pdRoot -Force).Count -eq 0)
+    Set-Item Function:\Send-SmShareFile $keepSend
+    # vom Fenster angelegter Ordner (WorkDir): nur die erwartete Form, wird danach ebenfalls geloescht
+    $wd = New-SmDhcpWorkDir -Kind Export
+    $null = Publish-SmDhcpExport -Share ([pscustomobject]@{}) -WorkDir $wd
+    Check 'Export: uebergebener Arbeitsordner wird verwendet und danach geloescht' (-not (Test-Path -LiteralPath $wd))
+    Check 'Export: fremder oder falsch geformter Arbeitsordner abgelehnt' ((Throws { Publish-SmDhcpExport -Share ([pscustomobject]@{}) -WorkDir (Join-Path $Work 'irgendwo') }) -and (Throws { Publish-SmDhcpExport -Share ([pscustomobject]@{}) -WorkDir (Join-Path $pdRoot ('Import-' + ('a' * 32))) }))
+
+    # Schliessen des Fensters: Handles zu, Import-/Export-Ordner dieser Sitzung weg
+    $cd1 = New-SmDhcpWorkDir -Kind Import; $cd2 = New-SmDhcpWorkDir -Kind Export
+    $fh = New-Object IO.FileStream((Join-Path $cd1 'export.zip'), [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $script:SmDhcpSrv = @{ Down = [pscustomobject]@{ Dir = $cd1; Handle = $fh }; Opened = $null; ExportDir = $cd2 }
+    Close-SmDhcpPage
+    Check 'Fenster schliessen: Handle zu, Import- und Export-Ordner geloescht' (-not (Test-Path -LiteralPath $cd1) -and -not (Test-Path -LiteralPath $cd2) -and $null -eq $script:SmDhcpSrv.Down -and $null -eq $script:SmDhcpSrv.ExportDir)
+    $script:SmDhcpSrv = $null; Close-SmDhcpPage   # ohne Sitzung: kein Fehler
+
+    # Start: verwaiste Ordner aelter als 24 h, nur eigene Namen und Besitzer
+    $oldA = Join-Path $pdRoot ('Export-' + ('a' * 32)); $oldB = Join-Path $pdRoot ('Import-' + ('b' * 32)); $newC = Join-Path $pdRoot ('Import-' + ('c' * 32)); $oddD = Join-Path $pdRoot 'Export-nicht-meins'; $oldE = Join-Path $pdRoot ('Export-' + ('e' * 32))
+    foreach ($d in $oldA, $oldB, $newC, $oddD, $oldE) { Protect-SmDnsStateDir -Path $d; [IO.File]::WriteAllText((Join-Path $d 'x.txt'), 'x') }
+    foreach ($d in $oldA, $oldB, $oddD, $oldE) { (Get-Item -LiteralPath $d).LastWriteTime = (Get-Date).AddHours(-30) }
+    $nGone = Remove-SmWorkOrphans -Root $pdRoot -NamePattern $script:SmDhcpWorkPattern -AllowedSids @($script:SmDnsStateSidsOverride | Where-Object { $_ })
+    Check 'Start: verwaiste Ordner aelter als 24 h geloescht, neuer Ordner und fremder Name bleiben' ($nGone -eq 3 -and -not (Test-Path $oldA) -and -not (Test-Path $oldB) -and -not (Test-Path $oldE) -and (Test-Path $newC) -and (Test-Path $oddD))
+    foreach ($d in $oddD) { Remove-Item -LiteralPath $d -Recurse -Force }
+    $oldF = Join-Path $pdRoot ('Export-' + ('f' * 32)); Protect-SmDnsStateDir -Path $oldF; (Get-Item -LiteralPath $oldF).LastWriteTime = (Get-Date).AddHours(-30)
+    $nOther = Remove-SmWorkOrphans -Root $pdRoot -NamePattern $script:SmDhcpWorkPattern -AllowedSids @('S-1-5-18')
+    Check 'Start: Ordner mit anderem Besitzer (nicht Administratoren/SYSTEM) bleibt stehen' ($nOther -eq 0 -and (Test-Path $oldF))
+    Check 'Start: Clear-SmDhcpOrphans raeumt mit den Standardregeln auf (Besitzer der Testordner ist erlaubt)' ((Clear-SmDhcpOrphans) -eq 1 -and -not (Test-Path $oldF) -and (Test-Path $newC))
+    Remove-Item -LiteralPath $newC -Recurse -Force
+    $jn2 = Join-Path $pdRoot ('Export-' + ('9' * 32)); $jt2 = Join-Path $Work 'orph-target'; New-Item -ItemType Directory -Force $jt2 | Out-Null; [IO.File]::WriteAllText((Join-Path $jt2 'keep.txt'), 'k')
+    try { [void](New-Item -ItemType Junction -Path $jn2 -Target $jt2); (Get-Item -LiteralPath $jn2 -Force).LastWriteTime = (Get-Date).AddHours(-30) } catch { }
+    if (Test-Path $jn2) { $nJ = Clear-SmDhcpOrphans; Check 'Start: Verknuepfung wird nicht verfolgt, Ziel bleibt' ($nJ -eq 0 -and (Test-Path (Join-Path $jt2 'keep.txt'))); [IO.Directory]::Delete($jn2) }
+}
+finally { $env:ProgramData = $oldPd; Set-Item Function:\Send-SmShareFile $keepSend }
+$sc = Get-Content -LiteralPath (Join-Path $Repo 'server\Start-SmServer.ps1') -Raw
+Check 'Server-Fenster ruft beim Start Clear-SmDhcpOrphans/-PrintOrphans/-DnsOrphans und beim Schliessen Close-SmDhcpPage/-PrintPage auf' ($sc -match 'Clear-SmDhcpOrphans' -and $sc -match 'Clear-SmPrintOrphans' -and $sc -match 'Clear-SmDnsOrphans' -and $sc -match 'Close-SmDhcpPage' -and $sc -match 'Close-SmPrintPage')
+$chk13 = Get-Content -LiteralPath (Join-Path $Repo 'docs\security-checklist.md') -Raw
+Check 'Checkliste Punkt 13: Arbeitsordner beim Beenden aufraeumen, Export im gehaerteten Ordner' ($chk13 -match 'Arbeitsordner beim Beenden auf.{1,3}umen' -and $chk13 -match 'Dhcp\\Export-')
+$uiSrc = Get-Content -LiteralPath (Join-Path $Repo 'server\SmDhcpServer.ps1') -Raw
+Check 'Neuer Server: berechnete SHA256 wird weder angezeigt noch protokolliert' ($uiSrc -notmatch 'Berechnet am neuen Server' -and $uiSrc -notmatch "heruntergeladen: \{0\} \(\{1\}\), SHA256" -and $uiSrc -notmatch 'stimmt vollstaendig mit der Datei ueberein: ')
+
+# Deaktivieren: Fehler und Teilausfuehrung stehen im Protokoll
+$script:M = New-OldServer; Reset-Calls
+$keepSet4 = ${function:Set-DhcpServerv4Scope}
+function Set-DhcpServerv4Scope { [CmdletBinding()] param([Parameter(Mandatory, Position = 1)][Net.IPAddress]$ScopeId, [ValidateSet('Active', 'InActive')][string]$State, [string]$Name, [switch]$PassThru, [string]$ComputerName)
+    if ($ScopeId.ToString() -eq '10.20.0.0') { throw 'Zugriff verweigert https://dhcp.contoso.local/x' }
+    Rec 'Set-DhcpServerv4Scope' $PSBoundParameters }
+$linesBefore = @(Get-Content -LiteralPath $script:SmDhcpAuditPath).Count
+Check 'Deaktivieren: Fehler in der Mitte wird weitergegeben' (Throws { Invoke-SmDhcpDeactivate -ScopeIds @('10.10.0.0', '10.20.0.0') -Prefixes @('fd00:10::') })
+$newLines = @(Get-Content -LiteralPath $script:SmDhcpAuditPath | Select-Object -Skip $linesBefore)
+$fl = @($newLines | Where-Object { $_ -match 'DHCP Deaktivieren fehlgeschlagen' })
+Check 'Deaktivieren: Protokollzeile nennt Fehler, gescheiterten Bereich, schon deaktivierte und nicht ausgefuehrte Bereiche (ohne Adresse)' ($fl.Count -eq 1 -and $fl[0] -match 'Zugriff verweigert' -and $fl[0] -match 'gescheitert bei v4 10\.20\.0\.0' -and $fl[0] -match 'schon deaktiviert: v4 10\.10\.0\.0' -and $fl[0] -match 'nicht ausgefuehrt: v6 fd00:10::' -and $fl[0] -notmatch 'https?://')
+Check 'Deaktivieren: der erfolgreiche Bereich hat seine eigene Zeile, der fehlgeschlagene keine' (@($newLines | Where-Object { $_ -match 'DHCP Bereich deaktiviert: v4 10\.10\.0\.0' }).Count -eq 1 -and @($newLines | Where-Object { $_ -match 'DHCP Bereich deaktiviert: v4 10\.20\.0\.0' }).Count -eq 0)
+Set-Item Function:\Set-DhcpServerv4Scope $keepSet4
+$script:IsAdmin = $false; $linesBefore = @(Get-Content -LiteralPath $script:SmDhcpAuditPath).Count
+$null = Throws { Invoke-SmDhcpDeactivate -ScopeIds @('10.10.0.0') }
+$pl = @(Get-Content -LiteralPath $script:SmDhcpAuditPath | Select-Object -Skip $linesBefore | Where-Object { $_ -match 'Deaktivieren fehlgeschlagen' })
+Check 'Deaktivieren: auch eine nicht bestandene Vorpruefung steht im Protokoll (nichts deaktiviert)' ($pl.Count -eq 1 -and $pl[0] -match 'Vorpruefung nicht bestanden' -and $pl[0] -match 'schon deaktiviert: keiner' -and $pl[0] -match 'nicht ausgefuehrt: v4 10\.10\.0\.0')
+$script:IsAdmin = $true
 $hits = @(Select-String -Path (Join-Path $Repo 'Modules\SmDhcp.ps1'), (Join-Path $Repo 'server\SmDhcpServer.ps1') -Pattern 'Import-Clixml', 'ConvertFrom-CliXml', 'Invoke-Expression')
 Check 'Keine Deserialisierung und kein Invoke-Expression in den DHCP-Dateien' ($hits.Count -eq 0)
 

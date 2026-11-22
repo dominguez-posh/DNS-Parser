@@ -255,7 +255,7 @@ $folder = '/personal/max_contoso_com/Documents/Projektliste Test'
 $linkM = "$base/:f:/g/personal/max_contoso_com/EAbcDEF?e=x1Y2z3"
 $store = [hashtable]::Synchronized(@{})     # Dateiname -> Bytes
 $vers = [hashtable]::Synchronized(@{})      # Dateiname -> Versionszaehler (Teil des ETag)
-$flags = [hashtable]::Synchronized(@{ IgnoreIfMatch = $false; Puts = 0; Adds = 0; OmitEtag = $false; LieLength = $false; BigBody = $false; Redirect = $false })
+$flags = [hashtable]::Synchronized(@{ IgnoreIfMatch = $false; Puts = 0; Adds = 0; OmitEtag = $false; LieLength = $false; BigBody = $false; Redirect = $false; RedirHits = 0 })
 $listener = New-Object Net.HttpListener
 $listener.Prefixes.Add("$base/"); $listener.Prefixes.Add("http://127.0.0.1:$port/")
 $listener.Start()
@@ -272,6 +272,7 @@ $server = [powershell]::Create(); $server.Runspace = $rs
             try { $c = $listener.GetContext() } catch { break }
             $q = $c.Request; $res = $c.Response
             $raw = [uri]::UnescapeDataString($q.RawUrl)
+            if ($q.Url.AbsolutePath -like '/redir/*') { $flags.RedirHits++ }
             $body = $null; $status = 200; $type = 'application/json'; $name = $null
             $guest = $q.Cookies['FedAuth'] -and $q.Cookies['FedAuth'].Value -eq 'gast'
             $etagOf = { param($n) '"{11111111-2222-3333-4444-555555555555},' + $vers[$n] + '"' }
@@ -401,6 +402,7 @@ try {
     # Weiterleitungsziel und Groesse beim Lesen
     $flags.Redirect = $true
     Check 'Lesen: Weiterleitung auf anderes Ziel wird abgelehnt' (ThrowsLike { Read-SmProjectStore -Share $share -Password $pw } 'unerlaubten Ziel')
+    Check 'Lesen: das verbotene Weiterleitungsziel wurde nie angefragt (Pruefung vor dem Laden)' ($flags.RedirHits -eq 0)
     $flags.Redirect = $false
     $flags.LieLength = $true; $flags.BigBody = $true
     Check 'Lesen: tatsaechlich grosser Body (21 MB) wird trotz kleiner Laengenangabe abgelehnt' (ThrowsLike { Read-SmProjectStore -Share $share -Password $pw } 'ungewoehnlich gross')

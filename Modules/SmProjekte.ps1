@@ -465,11 +465,9 @@ function Read-SmProjectStore {
         if (-not $meta) { return [pscustomobject]@{ Exists = $false; ETag = $null; List = (New-SmProjectList) } }
         if ($meta.Length -gt $script:SmProjMaxBytes) { throw 'Die Projektdatei im Ablageort ist ungewoehnlich gross und wird nicht gelesen.' }
         $u = '{0}/_api/web/GetFileByServerRelativeUrl(@f)/$value?@f={1}' -f $Share.Web, (Format-SmSpString ($Share.Folder + '/' + $script:SmProjFileName))
-        try { $resp = Invoke-WebRequest -Uri $u -WebSession $Share.Session -UseBasicParsing -ErrorAction Stop -Headers @{ Accept = 'application/octet-stream' } }
+        # Weiterleitungsziel und Groesse werden VOR dem Laden geprueft: jedes Ziel einzeln (keine automatische Weiterleitung), der Body mit hartem Limit
+        try { $bytes = Get-SmShareBytes -Share $Share -Uri $u -MaxBytes $script:SmProjMaxBytes -DeniedText 'Die Projektdatei wurde von einem unerlaubten Ziel geliefert (erlaubt: https auf *.sharepoint.com). Abgebrochen.' -TooLargeText 'Die Projektdatei im Ablageort ist ungewoehnlich gross und wird nicht gelesen.' }
         catch { throw ('Die Projektliste ist nicht lesbar: ' + (Get-SmSafeMessage $_.Exception.Message @($Share.Link))) }
-        if (-not (Test-SmFinalHost -Final (Get-SmFinalUri $resp) -Authority ([string]$Share.Authority) -AnyHost:([bool]$Share.AnyHost))) { throw 'Die Projektdatei wurde von einem unerlaubten Ziel geliefert (erlaubt: https auf *.sharepoint.com). Abgebrochen.' }
-        if ($resp.RawContentStream.Length -gt $script:SmProjMaxBytes) { throw 'Die Projektdatei im Ablageort ist ungewoehnlich gross und wird nicht gelesen.' }
-        $bytes = $resp.RawContentStream.ToArray()
         $after = Get-SmProjectFileMeta -Share $Share
         if ($after -and $after.ETag -eq $meta.ETag) {
             $list = ConvertTo-SmProjectList (Unprotect-SmProjectData -Bytes $bytes -Password $Password)

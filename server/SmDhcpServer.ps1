@@ -49,20 +49,41 @@ function Write-SmDhcpAudit {
     $line
 }
 
-function Remove-SmDhcpTemp {
-    <# Loescht nur Ordner, die dieses Tool selbst unter %TEMP% angelegt hat (Pfad per GetFullPath geprueft). #>
-    param([string]$Dir, [string]$TempRoot = $env:TEMP)
+$script:SmDhcpWorkPattern = '^(Import|Export)-[0-9a-f]{32}$'   # Arbeitsordner unter ProgramData\ServerMigration\Dhcp
+
+function Remove-SmDhcpWorkDir {
+    <# Loescht nur Arbeitsordner Import-<GUID> oder Export-<GUID> direkt unter der Wurzel (Pfad per GetFullPath geprueft, keine Verknuepfung). #>
+    param([string]$Dir, [Alias('TempRoot')][string]$Root)
     if (-not $Dir) { return }
-    $full = [IO.Path]::GetFullPath($Dir)
-    $prefix = [IO.Path]::GetFullPath($TempRoot).TrimEnd('\') + '\ServerMigration-dhcp-'
-    if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
+    if (-not $Root) { $Root = Get-SmDhcpImportRoot }
+    $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+    if ((Split-Path -Leaf $full) -notmatch $script:SmDhcpWorkPattern) { return }
+    if ((Split-Path -Parent $full) -ine [IO.Path]::GetFullPath($Root).TrimEnd('\')) { return }
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { return }
+    if ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-function New-SmDhcpTemp {
-    param([string]$TempRoot = $env:TEMP)
-    $d = Join-Path ([IO.Path]::GetFullPath($TempRoot)) ('ServerMigration-dhcp-' + [guid]::NewGuid().ToString('N'))
-    [void](New-Item -ItemType Directory -Path $d)
-    $d
+function Open-SmDhcpHeldFile {
+    <# Haelt die Datei mit FileShare.Read offen (niemand kann sie schreiben oder ersetzen) und bildet den SHA256 ueber genau diese Bytes. Handle bis nach dem Hochladen offen lassen. #>
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Path)
+    Assert-SmDhcpNoReparse -Path $Dir, $Path
+    $h = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        Assert-SmDhcpNoReparse -Path $Path
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha.ComputeHash($h) } finally { $sha.Dispose() }
+        $h.Position = 0
+        [pscustomobject]@{ Handle = $h; Sha256 = (-join ($hash | ForEach-Object { $_.ToString('X2') })); Length = $h.Length }
+    }
+    catch { $h.Dispose(); throw }
+}
+
+function Clear-SmDhcpOrphans {
+    <# Start des Server-Fensters: verwaiste Import-/Export-Ordner (aelter als 24 h, Besitzer Administratoren oder SYSTEM) loeschen. #>
+    param([Alias('TempRoot')][string]$Root)
+    if (-not $Root) { $Root = Get-SmDhcpImportRoot }
+    Remove-SmWorkOrphans -Root $Root -NamePattern $script:SmDhcpWorkPattern
 }
 
 # ---------------------------------------------------------------- Vorpruefung
@@ -223,7 +244,7 @@ function Write-SmDhcpSummaryFile {
 # ---------------------------------------------------------------- Export (alter Server) und Zusammenfassung (neuer Server)
 
 function New-SmDhcpExport {
-    <# Export-DhcpServer -File -Leases plus Zusammenfassung, beides in ein ZIP (dhcp-export.xml, dhcp-summary.json). Liefert Pfad, Name, SHA256, Laenge und die Zusammenfassung. #>
+    <# Export-DhcpServer -File -Leases plus Zusammenfassung, beides in ein ZIP (dhcp-export.xml, dhcp-summary.json). Liefert Pfad, Name, Laenge und die Zusammenfassung (der SHA256 wird erst ueber die gehaltene Datei gebildet, siehe Publish-SmDhcpExport). #>
     param([Parameter(Mandatory)][string]$WorkDir, [scriptblock]$Log, [switch]$NoLeases)
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $xml = Join-Path $WorkDir $script:SmDhcpXmlEntry
@@ -242,7 +263,7 @@ function New-SmDhcpExport {
         [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $json, $script:SmDhcpSummaryEntry, 'Optimal')
     }
     finally { $zip.Dispose() }
-    [pscustomobject]@{ Path = $zipPath; Name = $name; Sha256 = (Get-SmSha256Local $zipPath); Length = (Get-Item -LiteralPath $zipPath).Length; Summary = $summary }
+    [pscustomobject]@{ Path = $zipPath; Name = $name; Length =(Get-Item -LiteralPath $zipPath).Length; Summary = $summary }
 }
 
 function Get-SmSha256Local {
@@ -263,37 +284,57 @@ function Get-SmSha256Bytes {
 }
 
 function Publish-SmDhcpExport {
-    <# Alter Server: Vorpruefung, Export, ZIP in den Tauschordner (grosse Dateien in Teilen). Liefert Name, Sha256, Laenge und Zusammenfassung. #>
-    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP, [switch]$NoLeases)
+    <#
+    Alter Server: Vorpruefung, Export, ZIP in den Tauschordner (grosse Dateien in Teilen). Liefert Name, Sha256, Laenge und Zusammenfassung.
+    Gearbeitet wird nicht unter %TEMP%, sondern in Dhcp\Export-<GUID> im gehaerteten Ordner (Protect-SmDnsStateDir, ReparsePoint-Pruefung).
+    Der SHA256 wird ueber die Bytes gebildet, die hochgeladen werden: Die ZIP bleibt dabei mit FileShare.Read gesperrt. Danach wird aufgeraeumt.
+    WorkDir: bereits angelegter Export-<GUID>-Ordner (das Fenster merkt ihn sich, um ihn beim Schliessen aufzuraeumen).
+    #>
+    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [Alias('TempRoot')][string]$WorkRoot, [string]$WorkDir, [switch]$NoLeases)
     $pre = Test-SmDhcpPrecheck -Mode Export
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
-    $work = New-SmDhcpTemp -TempRoot $TempRoot
+    $work = Resolve-SmDhcpWorkDir -Kind Export -Root $WorkRoot -Dir $WorkDir
+    $held = $null
     try {
         $exp = New-SmDhcpExport -WorkDir $work -Log $Log -NoLeases:$NoLeases
-        & $Log ('ZIP gepackt: {0} ({1:N1} MB), SHA256 {2}' -f $exp.Name, ($exp.Length / 1MB), $exp.Sha256)
+        $held = Open-SmDhcpHeldFile -Dir $work -Path $exp.Path
+        & $Log ('ZIP gepackt: {0} ({1:N1} MB)' -f $exp.Name, ($held.Length / 1MB))
         $remote = Send-SmShareFile -Share $Share -Path $exp.Path -Progress $Progress
-        [void](Write-SmDhcpAudit -Action 'Export' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $exp.Name, $exp.Sha256, @($exp.Summary.Scopes4).Count, @($exp.Summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
-        [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $exp.Sha256; Summary = $exp.Summary }
+        [void](Write-SmDhcpAudit -Action 'Export' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $exp.Name, $held.Sha256, @($exp.Summary.Scopes4).Count, @($exp.Summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
+        [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $held.Sha256; Summary = $exp.Summary }
     }
-    finally { Remove-SmDhcpTemp -Dir $work -TempRoot $TempRoot }
+    finally { if ($held) { $held.Handle.Dispose() }; Remove-SmDhcpWorkDir -Dir $work -Root $WorkRoot }
+}
+
+function Resolve-SmDhcpWorkDir {
+    <# Liefert einen gehaerteten Arbeitsordner: den uebergebenen (nur Form Kind-<GUID> direkt unter der Wurzel, keine Verknuepfung) oder einen neuen. #>
+    param([ValidateSet('Import', 'Export')][string]$Kind, [string]$Root, [string]$Dir)
+    if (-not $Dir) { return (New-SmDhcpWorkDir -Kind $Kind -Root $Root) }
+    if (-not $Root) { $Root = Get-SmDhcpImportRoot }
+    $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+    if ((Split-Path -Leaf $full) -notmatch ('^' + $Kind + '-[0-9a-f]{32}$') -or (Split-Path -Parent $full) -ine [IO.Path]::GetFullPath($Root).TrimEnd('\')) { throw 'Der Arbeitsordner hat nicht die erwartete Form.' }
+    Protect-SmDnsStateDir -Path $full
+    Assert-SmDhcpNoReparse -Path $full
+    $full
 }
 
 function Publish-SmDhcpAfter {
     <# Neuer Server (nach dem Import): gleiche Zusammenfassung erzeugen und als DHCP-Nachher-*.json hochladen. #>
-    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP, [switch]$NoLeases)
+    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [Alias('TempRoot')][string]$WorkRoot, [switch]$NoLeases)
     $pre = Test-SmDhcpPrecheck -Mode Export
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
-    $work = New-SmDhcpTemp -TempRoot $TempRoot
+    $work = New-SmDhcpWorkDir -Kind Export -Root $WorkRoot   # gleicher gehaerteter Ordner wie beim Export (die Datei enthaelt MAC-Adressen)
+    $held = $null
     try {
         $name = 'DHCP-Nachher-{0}-{1}.json' -f (Get-SmDhcpHostName), (Get-Date -Format 'yyyyMMdd-HHmmss')
         $path = Join-Path $work $name
         $summary = Write-SmDhcpSummaryFile -Summary (Get-SmDhcpSummary -Log $Log -NoLeases:$NoLeases) -Path $path
-        $sha = Get-SmSha256Local $path
+        $held = Open-SmDhcpHeldFile -Dir $work -Path $path
         $remote = Send-SmShareFile -Share $Share -Path $path -Progress $Progress
-        [void](Write-SmDhcpAudit -Action 'Zusammenfassung hochgeladen' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $name, $sha, @($summary.Scopes4).Count, @($summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
-        [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $sha; Summary = $summary }
+        [void](Write-SmDhcpAudit -Action 'Zusammenfassung hochgeladen' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $name, $held.Sha256, @($summary.Scopes4).Count, @($summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
+        [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $held.Sha256; Summary = $summary }
     }
-    finally { Remove-SmDhcpTemp -Dir $work -TempRoot $TempRoot }
+    finally { if ($held) { $held.Handle.Dispose() }; Remove-SmDhcpWorkDir -Dir $work -Root $WorkRoot }
 }
 
 # ---------------------------------------------------------------- Import (neuer Server)
@@ -313,11 +354,17 @@ function Assert-SmDhcpNoReparse {
 }
 
 function New-SmDhcpImportDir {
-    <# Neuer Ordner Import-<GUID> im gehaerteten Importordner (Protect-SmDnsStateDir auf jeder Ebene, ReparsePoint-Pruefung). #>
     param([string]$ImportRoot)
+    New-SmDhcpWorkDir -Kind Import -Root $ImportRoot
+}
+
+function New-SmDhcpWorkDir {
+    <# Neuer Ordner Import-<GUID> oder Export-<GUID> im gehaerteten Arbeitsordner (Protect-SmDnsStateDir auf jeder Ebene, ReparsePoint-Pruefung). #>
+    param([ValidateSet('Import', 'Export')][string]$Kind = 'Import', [string]$Root)
+    $ImportRoot = $Root
     if (-not $ImportRoot) { Protect-SmDnsStateDir -Path (Get-SmDnsStateDir); $ImportRoot = Get-SmDhcpImportRoot }
     Protect-SmDnsStateDir -Path $ImportRoot
-    $d = Join-Path ([IO.Path]::GetFullPath($ImportRoot)) ('Import-' + [guid]::NewGuid().ToString('N'))
+    $d = Join-Path ([IO.Path]::GetFullPath($ImportRoot)) ($Kind + '-' + [guid]::NewGuid().ToString('N'))
     Protect-SmDnsStateDir -Path $d
     Assert-SmDhcpNoReparse -Path $d
     $d
@@ -560,17 +607,37 @@ function Get-SmDhcpDeactivatePlan {
 function Invoke-SmDhcpDeactivate {
     <# Set-DhcpServerv4Scope/-v6Scope -State InActive fuer die gewaehlten Bereiche (alter Server, nach dem Import, mit Bestaetigung durch den Aufrufer). Rueckweg: -State Active. #>
     param([string[]]$ScopeIds = @(), [string[]]$Prefixes = @(), [scriptblock]$Log = { param($m) })
-    $pre = Test-SmDhcpPrecheck -Mode Deactivate
-    if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
-    $plan = Get-SmDhcpDeactivatePlan -ScopeIds $ScopeIds -Prefixes $Prefixes
-    if (-not $plan.Ok) { throw ('Bereiche nicht gefunden oder keine Auswahl: ' + ($plan.Missing -join ', ')) }
-    foreach ($id in $ScopeIds) {
-        Set-DhcpServerv4Scope -ScopeId ([Net.IPAddress]::Parse($id)) -State InActive -ErrorAction Stop
-        [void](Write-SmDhcpAudit -Action 'Bereich deaktiviert' -Text ('v4 ' + $id) -Log $Log)
+    $wanted = @(@($ScopeIds | ForEach-Object { 'v4 ' + $_ }) + @($Prefixes | ForEach-Object { 'v6 ' + $_ }))
+    $done = New-Object System.Collections.Generic.List[string]
+    $cur = ''
+    try {
+        $pre = Test-SmDhcpPrecheck -Mode Deactivate
+        if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
+        $plan = Get-SmDhcpDeactivatePlan -ScopeIds $ScopeIds -Prefixes $Prefixes
+        if (-not $plan.Ok) { throw ('Bereiche nicht gefunden oder keine Auswahl: ' + ($plan.Missing -join ', ')) }
+        foreach ($id in $ScopeIds) {
+            $cur = 'v4 ' + $id
+            Set-DhcpServerv4Scope -ScopeId ([Net.IPAddress]::Parse($id)) -State InActive -ErrorAction Stop
+            $done.Add($cur)
+            [void](Write-SmDhcpAudit -Action 'Bereich deaktiviert' -Text $cur -Log $Log)
+        }
+        foreach ($px in $Prefixes) {
+            $cur = 'v6 ' + $px
+            Set-DhcpServerv6Scope -Prefix ([Net.IPAddress]::Parse($px)) -State InActive -ErrorAction Stop
+            $done.Add($cur)
+            [void](Write-SmDhcpAudit -Action 'Bereich deaktiviert' -Text $cur -Log $Log)
+        }
     }
-    foreach ($px in $Prefixes) {
-        Set-DhcpServerv6Scope -Prefix ([Net.IPAddress]::Parse($px)) -State InActive -ErrorAction Stop
-        [void](Write-SmDhcpAudit -Action 'Bereich deaktiviert' -Text ('v6 ' + $px) -Log $Log)
+    catch {
+        # Fehler und Teilausfuehrung protokollieren: was schon deaktiviert ist, woran es scheiterte, was nicht mehr drankam
+        $msg = [string]$_.Exception.Message; if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) }
+        $open = @($wanted | Where-Object { $done -notcontains $_ -and $_ -ne $cur })
+        $txt = 'Fehler: ' + $msg
+        if ($cur) { $txt += ' | gescheitert bei ' + $cur }
+        $txt += ' | schon deaktiviert: ' + $(if ($done.Count) { $done -join ', ' } else { 'keiner' })
+        if ($open.Count) { $txt += ' | nicht ausgefuehrt: ' + ($open -join ', ') }
+        [void](Write-SmDhcpAudit -Action 'Deaktivieren fehlgeschlagen' -Text $txt -Log $Log)
+        throw
     }
     $ScopeIds.Count + $Prefixes.Count
 }
@@ -599,7 +666,7 @@ function Register-SmDhcpServerPage {
         [Parameter(Mandatory)][hashtable]$Ui, [Parameter(Mandatory)][string[]]$JobModules,
         [Parameter(Mandatory)][scriptblock]$GetShare, [Parameter(Mandatory)][scriptblock]$AddLog
     )
-    $script:SmDhcpSrv = @{ Ui = $Ui; Modules = $JobModules; GetShare = $GetShare; AddLog = $AddLog; Remote = @{}; Down = $null; Opened = $null; OldScopes = @{}; LastSha = $null; ImportedHere = $false }
+    $script:SmDhcpSrv = @{ Ui = $Ui; Modules = $JobModules; GetShare = $GetShare; AddLog = $AddLog; Remote = @{}; Down = $null; Opened = $null; ExportDir = $null; OldScopes = @{}; LastSha = $null; ImportedHere = $false }
     $Ui.BtnDhcpCopySha.IsEnabled = $false
     $Ui.BoxDhcpImport.Visibility = 'Collapsed'
 
@@ -624,9 +691,12 @@ function Register-SmDhcpServerPage {
             $msg = Get-SmDhcpExportText -NoLeases:$noLeases
             if ([System.Windows.MessageBox]::Show($msg, 'DHCP exportieren', 'YesNo', 'Question') -ne 'Yes') { & $c.AddLog 'DHCP-Export abgebrochen.'; return }
             $u.BtnDhcpExport.IsEnabled = $false; $u.BtnDhcpCopySha.IsEnabled = $false; $c.LastSha = $null; $u.PrgDhcpExport.Value = 0; $u.PrgDhcpExport.Visibility = 'Visible'; $u.TxtDhcpExport.Text = 'Exportiere ...'; $u.TxtDhcpExportSha.Text = ''
-            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; NoLeases = $noLeases } -Script {
+            # Arbeitsordner hier anlegen, damit das Fenster ihn beim Schliessen aufraeumen kann
+            try { if ($c.ExportDir) { Remove-SmDhcpWorkDir -Dir $c.ExportDir }; $c.ExportDir = New-SmDhcpWorkDir -Kind Export }
+            catch { $c.ExportDir = $null; $u.BtnDhcpExport.IsEnabled = $true; $u.TxtDhcpExport.Text = 'Fehlgeschlagen'; & $c.AddLog ('DHCP-Export: Arbeitsordner nicht moeglich: ' + $_.Exception.Message); return }
+            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; NoLeases = $noLeases; WorkDir = $c.ExportDir } -Script {
                     param($State, $P)
-                    Publish-SmDhcpExport -Share $P.Share -NoLeases:$P.NoLeases -Progress { param($sent, $total) $State.Sent = $sent; $State.Total = $total } -Log { param($m) $State.Log.Enqueue($m) }
+                    Publish-SmDhcpExport -Share $P.Share -WorkDir $P.WorkDir -NoLeases:$P.NoLeases -Progress { param($sent, $total) $State.Sent = $sent; $State.Total = $total } -Log { param($m) $State.Log.Enqueue($m) }
                 } -OnTick { param($s) Write-SmDhcpJobLog $s; if ($s.Total -gt 0) { $script:SmDhcpSrv.Ui.PrgDhcpExport.Value = [math]::Min(100, 100 * $s.Sent / $s.Total) } } -OnDone {
                     param($result, $err)
                     $c2 = $script:SmDhcpSrv; $c2.Ui.BtnDhcpExport.IsEnabled = $true
@@ -679,9 +749,10 @@ function Register-SmDhcpServerPage {
                     $c2 = $script:SmDhcpSrv; $u2 = $c2.Ui; $u2.BtnDhcpDownload.IsEnabled = $true
                     if ($err) { $u2.TxtDhcpDlSha.Text = 'Fehlgeschlagen'; & $c2.AddLog ('DHCP: Download fehlgeschlagen: ' + $err); return }
                     $c2.Down = $result[-1]
-                    $u2.TxtDhcpDlSha.Text = 'Berechnet am neuen Server: SHA256 ' + $c2.Down.Sha256
+                    # Die berechnete SHA256 wird absichtlich weder angezeigt noch protokolliert (wie bei Print): sie muss vom alten Server eingegeben werden.
+                    $u2.TxtDhcpDlSha.Text = 'Heruntergeladen: ' + $c2.Down.Name + ' (' + (Format-SmSize $c2.Down.Length) + '). Die berechnete SHA256 wird hier absichtlich nicht angezeigt.'
                     $u2.TxtDhcpShaIn.IsEnabled = $true; $u2.TxtDhcpShaState.Text = 'Bitte die vollstaendige SHA256 vom alten Server einfuegen.'
-                    & $c2.AddLog ('DHCP: heruntergeladen: {0} ({1}), SHA256 {2}' -f $c2.Down.Name, (Format-SmSize $c2.Down.Length), $c2.Down.Sha256)
+                    & $c2.AddLog ('DHCP: heruntergeladen: {0} ({1})' -f $c2.Down.Name, (Format-SmSize $c2.Down.Length))
                 })
         })
     $Ui.TxtDhcpShaIn.Add_TextChanged({
@@ -695,7 +766,7 @@ function Register-SmDhcpServerPage {
             $c = $script:SmDhcpSrv; $u = $c.Ui
             if (-not $c.Down -or -not (Test-SmDhcpShaMatch -Expected $c.Down.Sha256 -Entered $u.TxtDhcpShaIn.Text)) { $u.BtnDhcpOpen.IsEnabled = $false; return }
             $entered = $u.TxtDhcpShaIn.Text
-            & $c.AddLog ('DHCP: eingegebene SHA256 stimmt vollstaendig mit der Datei ueberein: ' + $c.Down.Sha256)
+            & $c.AddLog 'DHCP: eingegebene SHA256 stimmt vollstaendig mit der Datei ueberein (passt).'
             $u.BtnDhcpOpen.IsEnabled = $false
             [void](Start-SmJob -Modules $c.Modules -Params @{ Zip = $c.Down.ZipPath; Dir = $c.Down.Dir; Sha = $entered } -Script {
                     param($State, $P)
@@ -856,6 +927,14 @@ function Register-SmDhcpServerPage {
                         })
                 })
         })
+}
+
+function Close-SmDhcpPage {
+    <# Beim Schliessen des Server-Fensters: Handles zu, Import-<GUID> und Export-<GUID> dieser Sitzung loeschen. Was dabei in Benutzung bleibt, raeumt der naechste Start auf (Clear-SmDhcpOrphans). #>
+    $c = $script:SmDhcpSrv
+    if (-not $c) { return }
+    try { if ($c.Down -or $c.Opened) { Close-SmDhcpImport -Down $c.Down -Opened $c.Opened; $c.Down = $null; $c.Opened = $null } } catch { }
+    try { if ($c.ExportDir) { Remove-SmDhcpWorkDir -Dir $c.ExportDir; $c.ExportDir = $null } } catch { }
 }
 
 function Write-SmDhcpJobLog {
