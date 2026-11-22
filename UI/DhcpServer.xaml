@@ -23,7 +23,7 @@
                     <TextBlock x:Name="TxtDhcpExport" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
                 </StackPanel>
                 <ProgressBar x:Name="PrgDhcpExport" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-                <TextBox x:Name="TxtDhcpExportSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" IsReadOnly="True" TextWrapping="Wrap"/>
+                <TextBox x:Name="TxtDhcpExportSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" TextWrapping="Wrap"/>
                 <Button x:Name="BtnDhcpCopySha" Content="SHA256 kopieren" IsEnabled="False" HorizontalAlignment="Left" Margin="0,8,0,0"/>
             </StackPanel>
         </Border>
@@ -39,7 +39,7 @@
                 <ListBox x:Name="LstDhcpExports" Style="{DynamicResource PlainList}" MaxHeight="100" Margin="0,8,0,0" AutomationProperties.Name="DHCP-Exporte im Tauschordner">
                     <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Margin="8,4" Foreground="{DynamicResource Text}"/></DataTemplate></ListBox.ItemTemplate>
                 </ListBox>
-                <TextBox x:Name="TxtDhcpDlSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" IsReadOnly="True" TextWrapping="Wrap"/>
+                <TextBox x:Name="TxtDhcpDlSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" TextWrapping="Wrap"/>
                 <TextBlock Text="SHA256 vom alten Server (dort mit „SHA256 kopieren“ holen und hier einfügen)" Style="{DynamicResource Hint}" Margin="0,8,0,2" TextWrapping="Wrap"/>
                 <TextBox x:Name="TxtDhcpShaIn" IsEnabled="False" FontFamily="{DynamicResource MonoFont}" FontSize="12" MaxLength="200" AutomationProperties.Name="SHA256 vom alten Server"/>
                 <TextBlock x:Name="TxtDhcpShaState" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>

@@ -45,6 +45,33 @@ foreach ($mode in 'Light', 'Dark') {
     }
 }
 
+# IsReadOnly an TextBox darf in keinem XAML stehen (Kundenserver: XamlParseException "unbekannter Member System.Windows.Controls.TextBox.IsReadOnly"); es wird im Code gesetzt (Set-SmSelectableReadOnly)
+$xamlTexts = @(Get-ChildItem -Path $repo -Recurse -Include *.xaml, *.ps1 -File | Where-Object { $_.FullName -notmatch '\\(\.git|\.claude|tests)\\' })
+$badRo = @()
+foreach ($f in $xamlTexts) {
+    $txt = [IO.File]::ReadAllText($f.FullName)
+    if ($txt -match '(?s)<TextBox\b[^>]*\sIsReadOnly\s*=') { $badRo += "$($f.Name): TextBox mit IsReadOnly" }
+    foreach ($m in [regex]::Matches($txt, '(?s)<Style\b[^>]*TargetType="(?:TextBox|TextBoxBase)"[^>]*>.*?</Style>')) {
+        if ($m.Value -match 'Property="(?:TextBox(?:Base)?\.)?IsReadOnly"') { $badRo += "$($f.Name): TextBox-Style setzt IsReadOnly" }
+    }
+}
+Check ("XAML: kein IsReadOnly an TextBox oder im TextBox-Style" + $(if ($badRo) { ' (' + ($badRo -join '; ') + ')' })) ($badRo.Count -eq 0)
+# Fenster mit Beispielseite bauen: SelectableText-TextBoxen sind IsReadOnly, andere TextBoxen nicht (eigener Prozess wegen Application-Singleton)
+$roProbe = Join-Path $work 'ro-probe.ps1'
+$roLines = @(
+    '$ErrorActionPreference = "Stop"',
+    ('$root = ''' + $repo.Replace("'", "''") + ''''),
+    '. (Join-Path $root "Modules\SmTheme.ps1"); . (Join-Path $root "Modules\SmShell.ps1")',
+    '$ns = ''xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"''',
+    '$page = "<StackPanel $ns><TextBox x:Name=""A"" Style=""{DynamicResource SelectableText}""/><TextBox x:Name=""B""/><TextBox x:Name=""C"" Style=""{DynamicResource SelectableText}""/></StackPanel>"',
+    '$w = New-SmWindow -Root $root -Title t -Pages @(@{ Key = "P"; Title = "P"; Glyph = 0xE753; Xaml = $page }) -Theme Light',
+    '"{0} {1} {2}" -f $w.Ui.A.IsReadOnly, $w.Ui.B.IsReadOnly, $w.Ui.C.IsReadOnly'
+)
+[IO.File]::WriteAllText($roProbe, ($roLines -join "`r`n"), [Text.UTF8Encoding]::new($true))
+$roOut = (& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $roProbe 2>&1 | Out-String).Trim()
+Check "SelectableText-TextBoxen sind nach New-SmWindow IsReadOnly, andere nicht: $roOut" ($roOut -eq 'True False True')
+# beide Fenster mit allen Seiten: New-SmWindow wirft, wenn eine SelectableText-TextBox nicht schreibgeschuetzt ist; -ParseOnly (Abschnitt 2) deckt das ab
+
 # ---------------------------------------------------------------- 3. Module laden
 . (Join-Path $repo 'Modules\SmTausch.ps1')
 . (Join-Path $repo 'Modules\SmPaket.ps1')

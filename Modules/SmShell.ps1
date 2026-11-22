@@ -12,6 +12,31 @@ function Get-SmXamlNames {
     }
 }
 
+function Get-SmSelectableTextXamlCount {
+    <# Anzahl der TextBox-Elemente eines XAML-Textes mit Style SelectableText (Soll fuer Set-SmSelectableReadOnly). #>
+    param([Parameter(Mandatory)][string]$Xaml)
+    [xml]$x = $Xaml
+    @($x.SelectNodes("//*[local-name()='TextBox'][contains(@Style,'SelectableText')]")).Count
+}
+
+function Set-SmSelectableReadOnly {
+    <#
+    Setzt IsReadOnly = $true auf allen TextBoxen mit Style SelectableText unterhalb von $Element (logischer Baum); liefert die Anzahl.
+    IsReadOnly steht bewusst nicht im XAML: TextBoxBase.IsReadOnly im Style einer TextBox laesst sich auf manchen .NET-Staenden
+    (Kundenserver) nicht laden (XamlParseException "unbekannter Member"). Zuweisung im Code geht ueberall.
+    #>
+    param([Parameter(Mandatory)][System.Windows.DependencyObject]$Element)
+    $n = 0
+    if ($Element -is [System.Windows.Controls.TextBox]) {
+        $style = $Element.Style
+        if ($style -and $style -eq $Element.TryFindResource('SelectableText')) { $Element.IsReadOnly = $true; $n++ }
+    }
+    foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($Element)) {
+        if ($child -is [System.Windows.DependencyObject]) { $n += Set-SmSelectableReadOnly -Element $child }
+    }
+    $n
+}
+
 function New-SmPlaceholderXaml {
     param([string]$Title, [string]$Text, [int]$Phase)
     $t = [Security.SecurityElement]::Escape($Title); $d = [Security.SecurityElement]::Escape($Text)
@@ -68,6 +93,9 @@ function New-SmWindow {
         $pageRoot = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($px))
         $pageRoot.Visibility = 'Collapsed'
         [void]$ui.PageHost.Children.Add($pageRoot)
+        $want = Get-SmSelectableTextXamlCount $xamlPage
+        $got = Set-SmSelectableReadOnly -Element $pageRoot
+        if ($got -ne $want) { throw "Seite $($p.Key): $want SelectableText-TextBoxen im XAML, aber nur $got schreibgeschuetzt gesetzt." }
         foreach ($n in (Get-SmXamlNames $xamlPage)) { $ui[$n] = $pageRoot.FindName($n) }
         $win.Pages[$p.Key] = $pageRoot
 
