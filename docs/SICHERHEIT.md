@@ -1,6 +1,6 @@
 # Sicherheit
 
-Diese Seite beschreibt, was das Tool absichert, was nicht, und was du als Anwender beachten musst. Die Prüfpunkte für Entwickler stehen in der [Sicherheits-Checkliste](security-checklist.md). Die Bedienung steht in der [Anleitung](ANLEITUNG.md).
+Diese Seite beschreibt, was das Tool absichert, was nicht, und was du als Anwender beachten musst. Die Prüfpunkte für Entwickler stehen in der [Sicherheits-Checkliste](security-checklist.md). Deren Punkte 12 bis 17 betreffen die Themen dieser Seite: personenbezogene Daten (12), Arbeitskopien bei Export und Import (13), Exportdateien mit Treibern (14), adprep (15), Kennwortpfad (16) und Seize (17). Die Bedienung steht in der [Anleitung](ANLEITUNG.md).
 
 ## Inhalt
 
@@ -22,7 +22,7 @@ Das Tool nutzt SHA256 an drei Stellen:
 | Prüfsumme | Woher der Sollwert kommt | Was sie verhindert |
 |---|---|---|
 | **Server-Paket** (Einzeiler) | Steht im Einzeiler, den das Berater-Tool erzeugt. | Dass jemand das Paket im Tauschordner austauscht: Der Einzeiler prüft die Bytes im Speicher, bevor etwas geschrieben, entpackt oder gestartet wird. |
-| **DHCP-Export** | Wird am alten Server angezeigt und von dir am neuen Server **vollständig eingegeben**. | Dass ein ausgetauschtes oder verändertes ZIP importiert wird. Verglichen wird über genau die Bytes der Arbeitskopie, die danach gesperrt gehalten wird. |
+| **DHCP-Export** | Wird am alten Server angezeigt und von dir am neuen Server **vollständig eingegeben**. | Dass ein ausgetauschtes oder verändertes ZIP importiert wird. Verglichen wird über genau die Bytes der Arbeitskopie, die danach gesperrt gehalten wird. Am neuen Server zeigt und protokolliert das Tool die berechnete SHA256 nicht, es meldet nur „passt“ oder „passt nicht“. |
 | **Print-Export und Inventur** | Wie bei DHCP, für beide Dateien. | Dasselbe. Eine Exportdatei mit Treibern gilt wie ein Skript: ohne Treffer kein Import. |
 
 **Was sie nicht schützen:**
@@ -74,7 +74,7 @@ Das Tool selbst schreibt den Link nie in Logs, Dateien, Fehlermeldungen oder den
 - Print: Benutzernamen (und Rechnernamen) lassen sich **pseudonymisieren**: HMAC-SHA256 mit einem zufälligen Schlüssel aus dem Zufallsgenerator, Ausgabe 12 Hexzeichen. Der Schlüssel steht nie in einer Datei, im Tauschordner oder im Protokoll. Das Berater-Tool kann Benutzernamen in Anzeige und Export zusätzlich kürzen, mit einem eigenen Schlüssel je Sitzung.
 - Sicherungsordner `%ProgramData%\ServerMigration` wird vor jeder Nutzung gehärtet: Besitzer und Zugriffsliste nur Administratoren und SYSTEM, keine Verknüpfung, sonst bricht das Tool ab.
 
-**Was du nach Projektende löschen musst** (das Tool löscht nichts davon automatisch außer seinen kurzlebigen Arbeitsordnern):
+**Was du nach Projektende löschen musst** (das Tool löscht nur seine Arbeitsordner, siehe [Anleitung, Aufräumen](ANLEITUNG.md#9-aufräumen)):
 
 1. **Tauschordner**: alle Dateien und die Freigabe.
 2. **Kundenserver**: `%ProgramData%\ServerMigration` (Exporte, Sicherungen, Protokolle, gesicherte Zustände) und `%TEMP%\ServerMigration-*`. Die DNS-Logdatei nach Absprache mit dem Kunden löschen oder behalten.
@@ -94,16 +94,16 @@ Jede Aktion, die etwas am Server verändert, folgt demselben Muster: **Vorprüfu
 | **DNS-Logging aus** | Administrator; DNS-Cmdlets; gesicherter Zustand wird streng geprüft (Ordner gehärtet, Größe, Werte, Pfad) und wiederhergestellt; Nachprüfung. |
 | **DNS-Logs hochladen** | Pfad wie oben; Logdatei vorhanden und nicht leer; genug Platz im Temp-Ordner; Arbeitsordner nur unter `%TEMP%\ServerMigration-dns-<Zufall>`, danach gelöscht. |
 | **DHCP-Export** | Modul `DhcpServer`, Dienst läuft, Administrator. Ändert nichts am DHCP-Server. Hinweisdialog zu personenbezogenen Daten. |
-| **DHCP-Import** | Wie Export; vollständige Prüfsumme; ZIP enthält genau `dhcp-export.xml` und `dhcp-summary.json`; Größenlimits; XML ohne DTD; Zusammenfassung stimmt bei Bereichen und Optionen 3, 6, 15, 44, 252 mit der XML überein, sonst kein Import; Arbeitskopie im gehärteten Ordner ohne Verknüpfungen, durch ein Handle gesperrt; Bestätigung mit Inhalt der XML; Dreifach-Frage bei vorhandenen Bereichen; Datenbanksicherung vor dem Import. |
+| **DHCP-Import** | Wie Export; vollständige Prüfsumme (am neuen Server nur „passt / passt nicht“, nie die berechnete SHA256); ZIP enthält genau `dhcp-export.xml` und `dhcp-summary.json`; Größenlimits; XML ohne DTD; Zusammenfassung stimmt bei Bereichen und Optionen 3, 6, 15, 44, 252 mit der XML überein, sonst kein Import; Arbeitskopie im gehärteten Ordner ohne Verknüpfungen, durch ein Handle gesperrt; Bestätigung mit Inhalt der XML; Dreifach-Frage bei vorhandenen Bereichen; Datenbanksicherung vor dem Import. |
 | **DHCP-Autorisierung** | Modul, Dienst, Administrator; Server ist noch nicht autorisiert; Autorisierungsliste lesbar; Bestätigung; Nachprüfung der Liste. |
-| **DHCP-Bereiche deaktivieren** | Bereiche existieren; Failover-Beziehungen werden gemeldet; Bestätigung nennt den Server; zusätzliche Warnung, wenn dieses Fenster selbst importiert hat. |
+| **DHCP-Bereiche deaktivieren** | Bereiche existieren; Failover-Beziehungen werden gemeldet; Bestätigung nennt den Server; zusätzliche Warnung, wenn dieses Fenster selbst importiert hat; Protokollzeile je Bereich (`dhcp-protokoll.log`). |
 | **Print-Export** | Administrator, Rolle Druckserver, `PrintBrm.exe`; Bestätigung; Exitcode von `PrintBrm`; Datei vorhanden und nicht leer. |
 | **Print-Import** | Wie Export plus: Export- und Inventur-Prüfsumme vollständig; Arbeitskopie im gehärteten Ordner, nicht als Verknüpfung, Besitzer Administrator oder SYSTEM, per Handle gesperrt und erneut gehasht; Platz (Datei mal zwei plus 500 MB); Druckspooler läuft; Namenskonflikte gegen die Inventur; Bestätigung mit Inhalt der Exportdatei (`PrintBrm -Q`); „Freigaben nicht übernehmen“ wirkt nur auf neu angelegte Drucker. |
 | **Druckprotokoll ein und aus** | Administrator; alter Zustand wird gesichert und beim Ausschalten wiederhergestellt; Größe 1 bis 4096 MB; Bestätigung. |
 | **Zugriffe sammeln** | Administrator; Bestätigung mit Datenschutzhinweis; Tage 1 bis 3650; Pseudonyme nur mit gültigem Schlüssel. |
 | **FSMO übertragen** | Administrator; AD-Modul; beschreibbarer DC; Gruppenmitgliedschaft im Token; Inhaber erreichbar; Replikation ohne Fehler; `dcdiag` ohne Fehler; Bestätigung; Nachprüfung der Rollen. |
 | **Seize** | Dazu drei Prüfungen des Inhabers (Ping, LDAP 389, RPC 135 im Abstand von 10 s, antwortet eines, ist Seize verboten); Haken „alter Inhaber dauerhaft entfernt“; getippter Rollenname; Rechte; Bestätigung; Nachprüfung. |
-| **DSRM-Kennwort** | Administrator; kein RODC. Weg A: Konto wird gelesen und bei aktiviertem oder privilegiertem Konto gewarnt; Erfolg nur bei Erfolgsmeldung von `ntdsutil`. Weg B: Kennwort zweimal, mindestens 12 Zeichen, drei von vier Zeichenarten; nur über die Standardeingabe; kurzer Timeout; nie protokolliert. |
+| **DSRM-Kennwort** | Administrator; kein RODC. Weg A: Konto wird gelesen und bei aktiviertem oder privilegiertem Konto gewarnt; Erfolg nur bei Erfolgsmeldung von `ntdsutil`; Zeitlimit 60 Sekunden. Weg B: Kennwort zweimal, mindestens 12 Zeichen, drei von vier Zeichenarten; nur über die Standardeingabe; kurzer Timeout; nie protokolliert. |
 | **Funktionsebene anheben** | Administrator; alle DCs tragen die Zielebene; bei Gesamtstruktur alle Domänen auf Zielebene; Replikation in Ordnung; Rechte (Domain Admins bzw. Enterprise Admins); getippter Name der Domäne bzw. Gesamtstruktur; Bestätigung; Nachprüfung. |
 | **adprep** | Administrator; nur eingebundenes Installationsmedium; Rolle des Servers (Schemamaster bzw. Infrastrukturmaster); Rechte; Replikation in Ordnung; Probekopie und Prüfung der Kopie (Signaturen, SHA256 gegen die Quelle); Bestätigung; Start nur aus der geprüften Kopie, die dabei gesperrt bleibt. |
 
@@ -119,8 +119,10 @@ Scheitert die Protokollzeile, meldet das Tool das als Fehler und schreibt es nic
 | DNS | DNS-Rolle oder DNS-Verwaltungs-Cmdlets | `Get-DnsServerDiagnostics`, `Set-DnsServerDiagnostics`. Metadaten: `Get-DnsServerForwarder`, `Get-DnsServerZone`; das AD-Modul nur für die Liste der DCs (fehlt es, steht ein Hinweis in der Metadatei). |
 | DHCP | Modul `DhcpServer`, Dienst `DHCPServer` läuft | Export, Import, Deaktivieren. Autorisierung in AD: Enterprise Admin oder entsprechend delegiert. |
 | Print | Rolle Druckserver, `PrintBrm.exe`, Druckspooler läuft | Export und Import. Druckprotokoll: `wevtutil`. Sofortbild: SMB-Cmdlets (nicht ermittelbare Teile werden als Hinweis vermerkt). |
-| AD, alle Aktionen | Modul `ActiveDirectory` auf dem neuen DC, Mitglied von **Domain Admins** | FSMO übertragen, Seize, Ebene der Domäne, adprep `/domainprep`. |
-| AD, Schemamaster | zusätzlich **Schema Admins** | FSMO-Rolle Schemamaster, adprep `/forestprep`. |
-| AD, Domänennamenmaster und Gesamtstruktur | zusätzlich **Enterprise Admins** | FSMO-Rolle Domänennamenmaster, Ebene der Gesamtstruktur, adprep `/forestprep`. |
+| AD, Übersicht | Modul `ActiveDirectory` auf dem neuen DC | Nur lesend: Übersicht, Replikation, dcdiag. |
+| AD, FSMO und Seize | **Domain Admins**; für die Rolle Schemamaster zusätzlich **Schema Admins**, für die Rolle Domänennamenmaster zusätzlich **Enterprise Admins** | Vorprüfung, Übertragung und Seize der jeweiligen Rolle. |
+| AD, Funktionsebene | **Domain Admins** für die Domäne, **Enterprise Admins** für die Gesamtstruktur | Ebene anheben. |
+| AD, adprep | **Domain Admins** für `/domainprep`; für `/forestprep` zusätzlich **Schema Admins** und **Enterprise Admins** | Schema-Update. |
+| AD, DSRM-Kennwort | Lokaler Administrator. Das Tool prüft dafür keine Gruppenmitgliedschaft; das Konto für die Synchronisierung muss lesbar sein. | DSRM-Kennwort. |
 
 Die Gruppenmitgliedschaft wird im Token der **aktuellen Anmeldung** geprüft. Wurde das Konto gerade erst aufgenommen, melde dich neu an.

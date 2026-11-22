@@ -38,7 +38,7 @@ Werkzeug für die Migration von Windows-Servern: DNS, DHCP, Printserver und Acti
 | **Print** | Inventuren alt und neu vergleichen, Druckzugriffe auswerten (je Benutzer, Rechner, Drucker), ungenutzte Drucker finden, Namen pseudonymisieren. | Export und Import mit PrintBrm, Inventur, Druckprotokoll (Ereignis 307) ein- und ausschalten und sammeln. |
 | **Active Directory** | Berichte des Server-Fensters anzeigen (Ebenen, Schema, DCs, FSMO, Replikation, dcdiag). | Übersicht, FSMO übertragen oder übernehmen, DSRM-Kennwort, Funktionsebenen anheben, Schema-Update (adprep). |
 
-Jede Änderung am Server hat eine Vorprüfung, eine Bestätigung im Fenster und eine Protokollzeile ohne Geheimnisse.
+Jede ändernde Aktion am Server hat eine Prüfung vorab, eine Bestätigung im Fenster und eine Protokollzeile ohne Geheimnisse. Das DNS-Logging protokolliert im Fenster.
 
 ## Ablauf
 
@@ -119,6 +119,7 @@ powershell.exe -NoProfile -STA -File tests\Test-Projekte.ps1          # Projektl
 powershell.exe -NoProfile -STA -File tests\Test-Dns.ps1               # DNS (mit -LargeMB 500 für die volle Geschwindigkeitsmessung)
 powershell.exe -NoProfile -STA -File tests\Test-Dhcp.ps1              # DHCP
 powershell.exe -NoProfile -STA -File tests\Test-Print.ps1             # Print
+powershell.exe -NoProfile -STA -File tests\Test-Ad.ps1                # Active Directory
 ```
 
 Jede Zeile meldet `OK` oder `FAIL`. Die Tests zeigen, dass der Code gegen die nachgebauten Gegenstellen funktioniert, nicht dass er auf echten Servern funktioniert.

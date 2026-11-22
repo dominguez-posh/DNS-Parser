@@ -203,13 +203,13 @@ Auf beiden Servern in der Seite DHCP **Vorprüfung** klicken. Sie prüft Cmdlets
 1. Server-Fenster am **alten** Server, Seite DHCP, Abschnitt **Alter Server: Export**.
 2. Entscheide über **Ohne Leases exportieren**. Leases enthalten MAC-Adressen und Hostnamen der Geräte, also personenbezogene Daten. Standard ist **mit** Leases. Ohne Leases vergleicht das Berater-Tool später nur die Anzahl.
 3. **Exportieren und hochladen** und die Rückfrage bestätigen. Das Tool schreibt `DHCP-Export-<Server>-<Datum>.zip` mit genau zwei Dateien: `dhcp-export.xml` (von `Export-DhcpServer`) und `dhcp-summary.json` (Zusammenfassung). Das ZIP geht in den Tauschordner.
-4. **SHA256 kopieren**. Das ist die Prüfsumme des ZIPs. Bewahre sie auf (Zwischenablage, Notiz), du brauchst sie am neuen Server. Du bekommst sie bewusst **nicht** über den Tauschordner.
+4. **SHA256 kopieren**. Das ist die Prüfsumme des ZIPs, gebildet über genau die Bytes, die hochgeladen werden. Bewahre sie auf (Zwischenablage, Notiz), du brauchst sie am neuen Server. Du bekommst sie bewusst **nicht** über den Tauschordner.
 
 ### Import am neuen Server
 
 1. Server-Fenster am **neuen** Server, Abschnitt **Neuer Server: Export holen und importieren**.
-2. **Exporte im Tauschordner suchen**, den Export wählen, **Herunterladen**. Die Datei landet in einem gesicherten Arbeitsordner unter `%ProgramData%\ServerMigration\Dhcp`.
-3. Füge die **vollständige SHA256 vom alten Server** ein. Das Tool zeigt die berechnete Prüfsumme absichtlich nicht an. Stimmt die Eingabe nicht vollständig, wird die Datei nicht geöffnet.
+2. **Exporte im Tauschordner suchen**, den Export wählen, **Herunterladen**. Die Datei landet in einem gesicherten Arbeitsordner unter `%ProgramData%\ServerMigration\Dhcp`. Dieser Ordner wird nach dem Import oder beim Schließen des Fensters gelöscht.
+3. Füge die **vollständige SHA256 vom alten Server** ein. Das Tool zeigt die berechnete Prüfsumme absichtlich nicht an, nur das Ergebnis des Vergleichs: „Die Pruefsumme stimmt vollstaendig ueberein.“ (dann ist **Export prüfen und Bereiche laden** freigegeben) oder „Die Pruefsumme stimmt NICHT ueberein (oder ist unvollstaendig). Oeffnen und Import bleiben aus.“ (dann wird die Datei nicht geöffnet).
 4. **Export prüfen und Bereiche laden**. Das Tool prüft, dass das ZIP genau die zwei erwarteten Dateien enthält, liest die XML ohne DTD und vergleicht sie mit der Zusammenfassung.
 5. Wähle **Alles importieren** oder **Nur ausgewählte Bereiche** (Liste anhaken). **Leases mit importieren** ist vorbelegt.
 6. **Importieren …**. Das Bestätigungsfenster zeigt, was die Export-XML wirklich enthält (Bereiche, Serveroptionen, Reservierungen, Ausschlüsse), und weist darauf hin, dass der Import vorher die DHCP-Datenbank sichert.
@@ -247,6 +247,7 @@ Erst wenn der neue Server die Bereiche übernommen hat und autorisiert ist:
 2. **Bereiche dieses Servers lesen**, Bereiche anhaken, **Gewählte Bereiche deaktivieren …**.
 3. Die Bestätigung nennt den Servernamen. Hat das Fenster in dieser Sitzung selbst importiert, warnt es zusätzlich, dass das vermutlich der neue Server ist. Bereiche in einer Failover-Beziehung werden gemeldet, weil die Änderung zum Partner repliziert würde.
 4. Die Bereiche stehen danach auf `InActive`. Rückgängig: Bereich wieder aktivieren.
+5. Jede Deaktivierung steht im Protokoll `%ProgramData%\ServerMigration\dhcp-protokoll.log`, eine Zeile je Bereich (`DHCP Bereich deaktiviert: v4 <Netz>`). Scheitert ein Bereich, steht dort, was schon deaktiviert war und was nicht mehr drankam.
 
 ## 7. Print
 
@@ -314,7 +315,7 @@ Ohne Druckprotokoll entsteht kein Ereignis 307 (Druckauftrag). Schalte es am **a
 
 Alle Aktionen laufen im Server-Fenster auf dem **neuen Domänencontroller** und ändern die Gesamtstruktur des Kunden. Das Fenster zeigt Hinweise, wenn es nicht als Administrator läuft oder das Modul `ActiveDirectory` fehlt. Dann sind die ändernden Knöpfe gesperrt.
 
-Jede Aktion hat: Vorprüfung, Bestätigungsfenster (mit Servername und Ziel), Protokollzeile in `%ProgramData%\ServerMigration\AD\Protokoll.log`. Wird das Protokoll nicht geschrieben, meldet das Tool es als Fehler.
+Jede ändernde Aktion hat: eine Prüfung vorab (Vorprüfung oder Prüfung der Eingaben), ein Bestätigungsfenster (mit Servername und Ziel) und eine Protokollzeile in `%ProgramData%\ServerMigration\AD\Protokoll.log`. Wird das Protokoll nicht geschrieben, meldet das Tool es als Fehler.
 
 ### Übersicht
 
@@ -351,10 +352,10 @@ Abschnitt **3 DSRM-Kennwort**. Zwei Wege:
 **A. Mit Domänenkonto synchronisieren (empfohlen).** Das Tool berührt kein Kennwort.
 
 1. Domänenkonto eintragen (`Konto` oder `CONTOSO\Konto`). Am besten ein **eigenes, deaktiviertes Konto**, das in keiner privilegierten Gruppe ist.
-2. **DSRM-Kennwort ändern …**. Das Tool liest das Konto und warnt, wenn es aktiviert oder in privilegierten Gruppen ist (dann wäre sein Kennwort zugleich das DSRM-Kennwort). Nach der Bestätigung läuft `ntdsutil` („set dsrm password“, „sync from domain account“). Es wirkt nur auf diesen Server.
+2. **DSRM-Kennwort ändern …**. Das Tool liest das Konto und warnt, wenn es aktiviert oder in privilegierten Gruppen ist (dann wäre sein Kennwort zugleich das DSRM-Kennwort). Nach der Bestätigung läuft `ntdsutil` („set dsrm password“, „sync from domain account“). Es wirkt nur auf diesen Server. Auch hier bricht das Tool nach 60 Sekunden ab; das Protokoll zeigt dann „fehlgeschlagen“, und du prüfst den Stand, bevor du wiederholst.
 3. Erfolg meldet das Tool nur, wenn `ntdsutil` die Erfolgsmeldung ausgibt. Der Exitcode allein genügt nicht.
 
-**B. Neues Kennwort setzen.** Das Kennwort wird zweimal eingegeben, mindestens 12 Zeichen, drei von vier Zeichenarten, ohne Anführungszeichen. Es geht nur über die Standardeingabe an `ntdsutil` und wird nirgends gespeichert, protokolliert oder hochgeladen. Bei **Domänencontroller** leer lassen heißt: dieser Server. Nimmt `ntdsutil` das Kennwort nicht an (keine Erfolgsmeldung oder keine Antwort nach 60 Sekunden), nutze Weg A. Variante B ist noch nicht an einem echten System erprobt.
+**B. Neues Kennwort setzen.** Das Kennwort wird zweimal eingegeben, mindestens 12 Zeichen, drei von vier Zeichenarten, ohne Anführungszeichen. Es geht nur über die Standardeingabe an `ntdsutil` und wird nirgends gespeichert, protokolliert oder hochgeladen. Bei **Domänencontroller** leer lassen heißt: dieser Server. Ein anderer DC muss per Ping oder LDAP erreichbar sein. Nimmt `ntdsutil` das Kennwort nicht an (keine Erfolgsmeldung oder keine Antwort nach 60 Sekunden), nutze Weg A. Variante B ist noch nicht an einem echten System erprobt.
 
 ### Funktionsebenen anheben
 
@@ -369,17 +370,19 @@ Abschnitt **4 Funktionsebene anheben**. **Nicht umkehrbar.** Lege vorher eine ak
 
 Abschnitt **5 Schema-Update (adprep)**. Nur nötig, wenn das Schema vorab erweitert werden soll. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch.
 
-1. **Binde das originale Microsoft-ISO des neuen Windows Servers ein** (Rechtsklick „Bereitstellen“). Andere Quellen (Ordner, Netzwerkpfade) lehnt das Tool ab.
-2. **Laufwerk suchen** trägt ein Laufwerk mit `support\adprep\adprep.exe` ein.
-3. **/forestprep prüfen** (auf dem Schemamaster) bzw. **/domainprep prüfen** (auf dem Infrastrukturmaster). Die Prüfung testet Administrator, Medium, Rolle des Servers, Gruppenmitgliedschaften und Replikation. Zusätzlich macht sie eine Probekopie: Das Tool kopiert `support\adprep` in einen gesicherten Ordner, hält die Kopie offen und prüft dort Signaturen (adprep.exe: Microsoft Windows, Microsoft Corporation, Kette in einer Microsoft-Wurzel) und die SHA256 der Kopie gegen die Quelle. Nicht signierbare Dateien (`.ldf`) kann es nicht prüfen, ihre SHA256 werden angezeigt.
+1. **Binde das originale Microsoft-ISO des neuen Windows Servers ein** (Rechtsklick „Bereitstellen“; ein DVD-Laufwerk geht auch). Andere Quellen (Ordner, Netzwerkpfade) lehnt das Tool ab.
+2. **Laufwerk suchen** trägt ein Laufwerk mit `support\adprep\adprep.exe` ein. Dabei zeigt das Tool den Hinweis „Nur ein originales Microsoft-ISO verwenden.“
+3. **/forestprep prüfen** (auf dem Schemamaster) bzw. **/domainprep prüfen** (auf dem Infrastrukturmaster). Die Prüfung testet Administrator, Medium, Rolle des Servers, Gruppenmitgliedschaften und Replikation. Zusätzlich macht sie eine Probekopie: Das Tool kopiert `support\adprep` in einen gesicherten Ordner, hält die Kopie offen und prüft dort Signaturen (adprep.exe: Microsoft Windows, Microsoft Corporation, Kette in einer Microsoft-Wurzel) und die SHA256 der Kopie gegen die Quelle. Nicht signierbare Dateien (`.ldf`) kann es nicht prüfen, ihre SHA256 werden angezeigt. Die Probekopie entsteht nur, wenn die übrigen Prüfpunkte bestehen, und wird danach gelöscht.
 4. Lege vorher eine Systemstatus-Sicherung an. Nach der Schemaerweiterung hilft nur eine Gesamtstruktur-Wiederherstellung.
-5. **/forestprep ausführen …** bzw. **/domainprep ausführen …**, bestätigen. adprep läuft **nur aus der geprüften Kopie** und bekommt die Rückfrage mit `C` beantwortet. Das Tool zeigt die Schema-Version vorher und nachher. Die Ausgabe steht in einer Datei unter `%ProgramData%\ServerMigration\AD`. Die Kopie wird danach gelöscht.
+5. **/forestprep ausführen …** bzw. **/domainprep ausführen …**, bestätigen. adprep läuft **nur aus der geprüften Kopie** und bekommt die Rückfrage mit `C` beantwortet. Das Tool zeigt die Schema-Version vorher und nachher. Die Ausgabe steht in `adprep-forest-<Datum>.log` bzw. `adprep-domain-<Datum>.log` unter `%ProgramData%\ServerMigration\AD`, zusammen mit den SHA256 aller Dateien der Kopie. Die Kopie wird danach gelöscht.
 
 <!-- Bild: Server-Fenster, AD-Seite mit Vorprüfung FSMO (Beispielserver dc01.contoso.local) -->
 
 ## 9. Aufräumen
 
 Nach dem Projekt:
+
+Das Tool räumt seine Arbeitsordner selbst auf. Beim Schließen des Server-Fensters werden die Import- und Export-Ordner dieser Sitzung gelöscht (DHCP) bzw. der Arbeitsordner des laufenden Imports (Print). Beim Start werden verwaiste Arbeitsordner gelöscht, die älter als 24 Stunden sind (DHCP, Print, DNS-Temp), sofern sie Administratoren oder SYSTEM gehören. Exporte, Sicherungen und Protokolle bleiben und musst du selbst löschen.
 
 | Wo | Was |
 |---|---|
