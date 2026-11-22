@@ -246,7 +246,7 @@ $ex = Invoke-SmPrintExport -Confirmed
 $brmArgs = (Get-Content -LiteralPath $env:SM_STUB_LOG -Raw).Trim()
 Check 'Export: PrintBrm -B -F <Datei im Sicherungsordner>' ($brmArgs -match '^-B -F "?[^"]+\.printerExport"?$' -and $brmArgs.Contains([IO.Path]::GetFullPath($made)))
 Check 'Export: Datei, SHA256 und Groesse' ((Test-Path $ex.Export.Path) -and $ex.Export.Sha256 -eq (Get-FileHash $ex.Export.Path -Algorithm SHA256).Hash -and $ex.Export.Name -match '^Print-Export-[A-Za-z0-9\-]+-\d{8}-\d{6}-[0-9a-f]{12}\.printerExport$')
-Check 'Export: PrintBrm schreibt in einen frischen Unterordner Export-<GUID> (nicht in den Sicherungsordner), danach verschoben ohne Ueberschreiben, Unterordner weg' ($brmArgs -match '\Export-[0-9a-f]{32}\Print-Export-' -and @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Export-*').Count -eq 0 -and (Split-Path -Parent $ex.Export.Path) -eq [IO.Path]::GetFullPath($made).TrimEnd('\') -and @(Test-SmSecureFile -Path $ex.Export.Path).Count -eq 0)
+Check 'Export: PrintBrm schreibt in einen frischen Unterordner Export-<GUID> (nicht in den Sicherungsordner), danach verschoben ohne Ueberschreiben, Unterordner weg' ($brmArgs -match '\\Export-[0-9a-f]{32}\\Print-Export-' -and @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Export-*').Count -eq 0 -and (Get-Item -LiteralPath (Split-Path -Parent $ex.Export.Path)).FullName.TrimEnd('\') -eq (Get-Item -LiteralPath $made).FullName.TrimEnd('\') -and @(Test-SmSecureFile -Path $ex.Export.Path).Count -eq 0)
 $env:SM_STUB_EXIT = '5'
 Check 'Export: PrintBrm-Fehler -> Abbruch, kein Export-<GUID>-Ordner bleibt liegen' ((Throws { Invoke-SmPrintExport -Confirmed }) -and @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Export-*').Count -eq 0)
 $env:SM_STUB_EXIT = '0'

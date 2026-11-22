@@ -72,7 +72,7 @@ Check 'Schriftlisten haben Fallback (Segoe UI, Consolas, Segoe MDL2 Assets)' ($b
 Check 'AD-Server: adprep-Phase nicht aus dem Tag' ((Get-Content -LiteralPath (Join-Path $Repo 'server\SmAdServer.ps1') -Raw) -notmatch '\$sender\.Tag')
 # Kodierung: Windows PowerShell 5.1 liest .ps1 ohne BOM als ANSI. Nicht-ASCII ohne BOM ist verboten, doppelt kodierter Text (Zeichenmuell) auch.
 $encBad = @()
-foreach ($f in (Get-ChildItem -LiteralPath $Repo -Recurse -File -Include *.ps1, *.psm1 | Where-Object { $_.FullName -notmatch '[\/]\.git[\/]' })) {
+foreach ($f in (Get-ChildItem -LiteralPath $Repo -Recurse -File | Where-Object { ($_.Extension -eq '.ps1' -or $_.Extension -eq '.psm1') -and $_.FullName -notmatch '[\\/]\.git[\\/]' })) {   # -Include wirkt mit -LiteralPath in 5.1 nicht
     $b = [IO.File]::ReadAllBytes($f.FullName)
     $bom = ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
     $n = $f.FullName.Substring($Repo.Length + 1)
