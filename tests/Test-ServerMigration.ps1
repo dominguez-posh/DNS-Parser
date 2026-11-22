@@ -88,8 +88,14 @@ $line = New-SmOneLiner -Link $good -Sha256 $sha
 Check 'Einzeiler: eine Zeile und ASCII' (($line -notmatch "[`r`n]") -and ($line -notmatch '[^\x20-\x7E]'))
 Check 'Einzeiler: Link und Pruefsumme enthalten' ($line.Contains("`$L='$good'") -and $line.Contains("`$H='$sha'"))
 Check 'Einzeiler: Skriptfreigabe nur -Scope Process' ($line.Contains('Set-ExecutionPolicy Bypass -Scope Process'))
-Check 'Einzeiler: Pruefung vor Entpacken und Start' ($line.IndexOf('Get-FileHash') -lt $line.IndexOf('Expand-Archive') -and $line.IndexOf('Expand-Archive') -lt $line.IndexOf('Start-SmServer.ps1'))
-Check 'Einzeiler: kein Verweis auf GPO, Kunden oder Leitstelle' ($line -notmatch '(?i)gpo|leitstelle')
+Check 'Einzeiler: Pruefung vor Entpacken und Start' ($line.IndexOf('ComputeHash') -lt $line.IndexOf('Expand-Archive') -and $line.IndexOf('Expand-Archive') -lt $line.IndexOf('Start-SmServer.ps1'))
+Check 'Einzeiler: schreibt kein Protokoll und keine Datei ausser dem Paket' ($line -notmatch '(?i)Start-Transcript|Out-File|Add-Content|Set-Content')
+Check 'Einzeiler: Zielpruefung nach Weiterleitung (https, sharepoint.com) vor dem Download' ($line.Contains("Scheme-ne'https'") -and $line.Contains('sharepoint\.com') -and $line.IndexOf('Scheme-ne') -lt $line.IndexOf('GetFileByServerRelativeUrl'))
+Check 'Einzeiler: Pruefsumme im Speicher, Ausfuehrung aus neuem Zufallsverzeichnis' ($line.Contains('ComputeHash($b)') -and $line.Contains('[guid]::NewGuid()') -and $line -notmatch 'Get-FileHash|OutFile|Remove-Item')
+Check 'Einzeiler: ServerArguments -ParseOnly erlaubt' ((New-SmOneLiner -Link $good -Sha256 $sha -ServerArguments '-ParseOnly').EndsWith('-ParseOnly}'))
+Check 'Einzeiler: ServerArguments mit Fremdcode abgelehnt' (Throws { New-SmOneLiner -Link $good -Sha256 $sha -ServerArguments "'; calc" })
+Check 'Einzeiler: ServerArguments, andere Schalter abgelehnt' (Throws { New-SmOneLiner -Link $good -Sha256 $sha -ServerArguments '-ParseOnly; calc' })
+Check 'Link: sharepoint.de nicht erlaubt (nur sharepoint.com)' (Throws { Test-SmShareLink 'https://contoso.sharepoint.de/:f:/g/x' })
 Check 'Einzeiler: falsche Pruefsumme abgelehnt' (Throws { New-SmOneLiner -Link $good -Sha256 'abc' })
 Check 'Einzeiler: Parser findet keine Syntaxfehler' ($(try { [void][scriptblock]::Create($line); $true } catch { $false }))
 
@@ -113,6 +119,7 @@ $stats = [hashtable]::Synchronized(@{ Start = 0; Continue = 0; Finish = 0; FailO
 
 $listener = New-Object Net.HttpListener
 $listener.Prefixes.Add("$base/")
+$listener.Prefixes.Add("http://127.0.0.1:$port/")
 $listener.Start()
 $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
 $server = [powershell]::Create(); $server.Runspace = $rs
@@ -130,6 +137,11 @@ $server = [powershell]::Create(); $server.Runspace = $rs
                 $res.AddHeader('Set-Cookie', 'FedAuth=gast; path=/')
                 $res.StatusCode = 302
                 $res.RedirectLocation = "$base$web/_layouts/15/onedrive.aspx?id=" + [uri]::EscapeDataString($folder) + '&ga=1'
+                $res.Close(); continue
+            }
+            elseif ($q.Url.AbsolutePath -eq '/:f:/g/personal/max_contoso_com/EVIL') {
+                $res.StatusCode = 302
+                $res.RedirectLocation = ($base -replace 'localhost', '127.0.0.1') + "$web/_layouts/15/onedrive.aspx?id=" + [uri]::EscapeDataString($folder)
                 $res.Close(); continue
             }
             elseif ($q.Url.AbsolutePath -eq "$web/_layouts/15/onedrive.aspx") { $type = 'text/html'; $body = [Text.Encoding]::UTF8.GetBytes('<html>OneDrive</html>') }
@@ -183,11 +195,13 @@ $server = [powershell]::Create(); $server.Runspace = $rs
 $serverHandle = $server.BeginInvoke()
 
 try {
-    $share = Connect-SmShare -Link $link
+    $share = Connect-SmShare -Link $link -AnyHost
     Check 'Freigabelink: Ordner erkannt' ($share.Folder -eq $folder)
     Check 'Freigabelink: Web erkannt' ($share.Web -eq "$base/personal/max_contoso_com")
     Check 'Freigabelink: Ordnername' ($share.Name -eq 'Tausch Test')
     Check 'leerer Tauschordner' (@(Get-SmShareFiles -Share $share).Count -eq 0)
+    $evil = $false; try { Connect-SmShare -Link "$base/:f:/g/personal/max_contoso_com/EVIL" -AnyHost | Out-Null } catch { $evil = $_.Exception.Message -match 'unerlaubtes Ziel' }
+    Check 'Tauschordner: Weiterleitung auf fremden Host abgelehnt' $evil
     $bad = $false; try { Connect-SmShare -Link "$base/nicht-da" | Out-Null } catch { $bad = $_.Exception.Message -match 'nicht erreichbar' }
     Check 'ungueltiger Link: verstaendliche Meldung' $bad
 
@@ -236,7 +250,7 @@ try {
     Check 'Paket im Tauschordner, Groesse stimmt' ($pub.Remote.Name -eq 'SM-Server-Paket.zip' -and $pub.Remote.Length -eq $pub.Package.Length)
     Check 'Paket im Tauschordner: Inhalt gleich der lokalen Datei' ((Get-SmSha256 -Bytes $store['SM-Server-Paket.zip']) -eq $pub.Package.Sha256)
     Check 'Einzeiler enthaelt die Pruefsumme des abgelegten Pakets' ($pub.OneLiner.Contains("`$H='$($pub.Package.Sha256)'"))
-    Check 'Einzeiler.txt geschrieben' ((Get-Content -LiteralPath (Join-Path $work 'pub\Einzeiler.txt') -Raw).Trim() -eq $pub.OneLiner)
+    Check 'Einzeiler wird nicht in eine Datei geschrieben' (-not (Test-Path (Join-Path $work 'pub\Einzeiler.txt')))
 
     $temp = Join-Path $work 'temp'; New-Item -ItemType Directory -Force $temp | Out-Null
     $runner = Join-Path $work 'einzeiler.ps1'
@@ -246,16 +260,25 @@ try {
     $oldTemp = $env:TEMP; $env:TEMP = $temp
     try { $out = & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $runner 2>&1 | Out-String } finally { $env:TEMP = $oldTemp }
     Check "Einzeiler: Paket geladen, geprueft, Fenster gebaut ($($out.Trim()))" ($out -match 'PARSE OK')
-    Check 'Einzeiler: Paket entpackt' (Test-Path (Join-Path $temp 'ServerMigration\ServerMigration\UI\Theme.xaml'))
+    $runDirs = @(Get-ChildItem -LiteralPath $temp -Directory -Filter 'ServerMigration-*')
+    Check 'Einzeiler: Paket in neues Zufallsverzeichnis entpackt' ($runDirs.Count -eq 1 -and $runDirs[0].Name -match '^ServerMigration-[0-9a-f]{32}$' -and (Test-Path (Join-Path $runDirs[0].FullName 'ServerMigration\UI\Theme.xaml')))
 
     # falsche Pruefsumme: nichts entpacken, nichts ausfuehren
-    Remove-Item (Join-Path $temp 'ServerMigration') -Recurse -Force
+    Remove-Item $runDirs[0].FullName -Recurse -Force
     $store['SM-Server-Paket.zip'] = [Text.Encoding]::ASCII.GetBytes('manipuliert')
     $env:TEMP = $temp
     $ErrorActionPreference = 'Continue'   # das Kind schreibt den erwarteten Fehler nach stderr
     try { $out2 = & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $runner 2>&1 | Out-String } finally { $env:TEMP = $oldTemp; $ErrorActionPreference = 'Stop' }
     Check 'falsche Pruefsumme: Abbruch mit Meldung' ($out2 -match 'Pruefsumme falsch' -and $out2 -notmatch 'PARSE OK')
-    Check 'falsche Pruefsumme: nichts entpackt' (-not (Test-Path (Join-Path $temp 'ServerMigration')))
+    Check 'falsche Pruefsumme: nichts entpackt, nichts geschrieben' (@(Get-ChildItem -LiteralPath $temp).Count -eq 0)
+
+    # Weiterleitung auf fremden Host: der Einzeiler bricht vor dem Download ab
+    $evilRunner = Join-Path $work 'einzeiler-evil.ps1'
+    [IO.File]::WriteAllText($evilRunner, (New-SmOneLiner -Link "$base/:f:/g/personal/max_contoso_com/EVIL" -Sha256 $pub.Package.Sha256 -ServerArguments '-ParseOnly' -AnyHost), [Text.Encoding]::ASCII)
+    $env:TEMP = $temp
+    $ErrorActionPreference = 'Continue'
+    try { $out3 = & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $evilRunner 2>&1 | Out-String } finally { $env:TEMP = $oldTemp; $ErrorActionPreference = 'Stop' }
+    Check 'Einzeiler: Weiterleitung auf fremden Host abgelehnt, nichts geschrieben' ($out3 -match 'unerlaubtes Ziel' -and $out3 -notmatch 'PARSE OK' -and @(Get-ChildItem -LiteralPath $temp).Count -eq 0)
 }
 finally {
     $listener.Stop(); $listener.Close()

@@ -1,0 +1,14 @@
+# Sicherheits-Checkliste
+
+Diese Punkte gelten für jede Änderung am Einzeiler, am Server-Paket, am Tauschordner und an allem, was auf dem Kunden-Server läuft.
+
+1. **Code auf dem Kunden-Server prüfen, bevor er läuft.** Das Paket wird als Bytes im Speicher per SHA256 geprüft. Erst danach wird es in ein neues Zufallsverzeichnis (`%TEMP%\ServerMigration-<GUID>`) geschrieben, dort entpackt und von dort gestartet.
+2. **Herkunft des Tools.** Das Tool kommt aus einem Release, nie durch einen stillen Wechsel auf `main`.
+3. **Werte nur per Whitelist.** Werte aus Links, Dateinamen, Umgebung und Parametern kommen nur über eine Whitelist-Regex in Einzeiler, URLs oder Pfade. Vor `Remove-Item -Recurse` wird der Zielpfad per `GetFullPath` geprüft.
+4. **SharePoint/OData.** Argumente gehen nur über `Format-SmSpString`. Dateinamen aus dem Tauschordner werden nur als Leaf übernommen und gegen eine Whitelist geprüft.
+5. **Nur https auf `*.sharepoint.com`**, auch nach Weiterleitungen. TLS 1.2 oder höher, keine Zertifikatsausnahmen.
+6. **Keine Geheimnisse in Spuren.** Links, Cookies, Digests und Kennwörter (z. B. DSRM) stehen nie in Logs, Dateien, Fehlermeldungen oder im Tauschordner. Die Shell-History bedenken: Ein Link im Einzeiler landet dort. Deshalb den Link mit kurzem Ablaufdatum anlegen und nach dem Projekt löschen.
+7. **Daten aus dem Tauschordner sind feindlich.** XML ohne DTD/XXE, CSV und Excel ohne Formel-Injection, Größenlimits für alles, was gelesen wird.
+8. **Ändernde Aktionen in AD, DHCP und Print.** Erst eine Vorprüfung, dann eine Bestätigung, danach eine Protokollzeile ohne Geheimnisse.
+9. **Skriptfreigabe nur mit `-Scope Process`.** Testschalter (`-AnyHost`, `-ParseOnly`) sind im Produktivpfad nicht erreichbar oder per Whitelist begrenzt.
+10. **Keine Kundendaten im Repo.** Keine Tenant-Links, keine internen Adressen, auch nicht in Tests. Beispieldaten nur mit `contoso.local`.

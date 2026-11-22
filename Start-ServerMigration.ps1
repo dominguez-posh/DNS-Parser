@@ -61,6 +61,7 @@ $startPage = @'
             <StackPanel>
                 <TextBlock Text="3  Einzeiler für den Server" Style="{DynamicResource CardTitle}"/>
                 <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Auf dem Server in einer PowerShell einfügen (Administrator). Stimmt die Prüfsumme nicht, wird nichts ausgeführt. Die Skriptfreigabe gilt nur für diesen PowerShell-Prozess."/>
+                <TextBlock Foreground="{DynamicResource Warning}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,8" Text="Link mit kurzem Ablaufdatum anlegen und nach dem Projekt löschen."/>
                 <TextBox x:Name="TxtOneLiner" Style="{DynamicResource SelectableText}" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140" VerticalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                     <Button x:Name="BtnCopy" Content="Einzeiler kopieren" Tag="&#xE8C8;" Margin="0,0,12,0"/>
@@ -130,7 +131,7 @@ $ui.BtnPublish.Add_Click({
         if (-not $script:Share) { return }
         $ui.BtnPublish.IsEnabled = $false; $ui.BoxOneLiner.Visibility = 'Collapsed'; $ui.PrgUpload.Value = 0; $ui.TxtProgress.Text = 'Baue Paket …'
         Add-Log 'Baue das Server-Paket und lege es im Tauschordner ab'
-        $out = Join-Path $env:TEMP 'ServerMigration-Berater'
+        $out = Join-Path $env:TEMP 'ServerMigration-Berater'   # nur das Paket, der Einzeiler wird nie in eine Datei geschrieben
         [void](Start-SmJob -Modules $jobModules -Params @{ Share = $script:Share; Root = $root; Out = $out } -OnTick { param($s) Update-Progress $s } -Script {
                 param($State, $P)
                 Publish-SmServerPackage -Share $P.Share -RepoRoot $P.Root -OutDir $P.Out -Progress { param($sent, $total) $State.Sent = $sent; $State.Total = $total }

@@ -24,7 +24,7 @@ function Test-SmShareLink {
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Link, [switch]$AnyHost)
     $l = $Link.Trim().Trim('<', '>').Trim()
-    $hostPattern = if ($AnyHost) { '(?:https?://[A-Za-z0-9.:-]+)' } else { '(?:https://[A-Za-z0-9-]+\.sharepoint\.(?:com|de|us|cn))' }   # AnyHost nur fuer Tests gegen einen nachgebauten Server
+    $hostPattern = if ($AnyHost) { '(?:https?://[A-Za-z0-9.:-]+)' } else { '(?:https://[A-Za-z0-9-]+\.sharepoint\.com)' }   # AnyHost nur fuer Tests gegen einen nachgebauten Server
     if ($l -notmatch ('^' + $hostPattern + "/[^\s'""\u2018\u2019\u201a\u201b]+$")) {
         throw 'Das ist kein SharePoint-/OneDrive-Freigabelink (https://<firma>.sharepoint.com/... bzw. https://<firma>-my.sharepoint.com/...), oder er enthaelt Leerzeichen bzw. Anfuehrungszeichen.'
     }
@@ -76,26 +76,31 @@ function New-SmOneLiner {
     .PARAMETER AnyHost
         Nur fuer Tests: erlaubt einen nachgebauten Server statt *.sharepoint.com (Anfuehrungszeichen und Leerzeichen bleiben verboten).
     .PARAMETER ServerArguments
-        Nur fuer Tests: haengt Argumente an den Start des Server-Fensters an (z. B. -ParseOnly).
+        Nur fuer Tests: haengt -ParseOnly an den Start des Server-Fensters an (Whitelist, nichts anderes erlaubt).
     #>
     param([Parameter(Mandatory)][string]$Link, [Parameter(Mandatory)][string]$Sha256, [string]$ServerArguments = '', [switch]$AnyHost)
     $l = Test-SmShareLink $Link -AnyHost:$AnyHost
     if ($Sha256 -notmatch '^[0-9A-F]{64}$') { throw 'Die Pruefsumme muss 64 Hexzeichen in Grossbuchstaben sein.' }
+    if ($ServerArguments -and $ServerArguments -notmatch '^-ParseOnly$') { throw 'ServerArguments: nur -ParseOnly ist erlaubt.' }
     $extra = if ($ServerArguments) { ' ' + $ServerArguments } else { '' }
+    # Ziel nach der Weiterleitung: https auf *.sharepoint.com (im Test: genau der Host des Links)
+    $hostCheck = if ($AnyHost) { '$u.Authority-ne''' + ([uri]$l).Authority + '''' } else { '$u.Scheme-ne''https''-or$u.Host-notmatch''^[A-Za-z0-9-]+\.sharepoint\.com$''' }
     $t = @(
         '& {[Net.ServicePointManager]::SecurityProtocol=3072;$ProgressPreference=''SilentlyContinue'';'
         '$L=''__LINK__'';$H=''__SHA__'';'
         '$r=iwr $L -UseBasicParsing -SessionVariable S;$u=$r.BaseResponse.ResponseUri;if(!$u){$u=$r.BaseResponse.RequestMessage.RequestUri};'
+        'if(__HOSTCHECK__){throw "Weiterleitung auf unerlaubtes Ziel: $($u.Host)"};'
         'if(($u.AbsoluteUri+'' ''+$r.Content)-notmatch''[?&](?:amp;)?(?:id|RootFolder)=((?:%2F|/)[^&"''''<>\s]+)''){throw "Kein Ordnerlink: $u"};'
         '$f=[uri]::UnescapeDataString($Matches[1]).TrimEnd(''/'');$p=$f.Trim(''/'')-split''/'';$w=([uri]$u).GetLeftPart(''Authority'');'
         'if($p[0]-match''^(personal|sites|teams)$''){$w+=''/''+$p[0]+''/''+$p[1]};'
-        '$t="$env:TEMP\ServerMigration";$z="$t.zip";'
-        'iwr ("$w/_api/web/GetFileByServerRelativeUrl(@f)/`$value?@f=''"+[uri]::EscapeDataString(($f+''/__PKG__'').Replace("''","''''"))+"''") -WebSession $S -OutFile $z -UseBasicParsing;'
-        'if((Get-FileHash $z -Algorithm SHA256).Hash-ne$H){throw ''Pruefsumme falsch: Das Paket im Tauschordner ist nicht das erwartete. Nichts ausgefuehrt.''};'
-        'Remove-Item $t -Recurse -Force -EA 0;Expand-Archive $z $t -Force;Set-ExecutionPolicy Bypass -Scope Process -Force -EA 0;'
+        '$b=(iwr ("$w/_api/web/GetFileByServerRelativeUrl(@f)/`$value?@f=''"+[uri]::EscapeDataString(($f+''/__PKG__'').Replace("''","''''"))+"''") -WebSession $S -UseBasicParsing).RawContentStream.ToArray();'
+        '$a=[Security.Cryptography.SHA256]::Create();'
+        'if((-join($a.ComputeHash($b)|%{$_.ToString(''X2'')}))-ne$H){throw ''Pruefsumme falsch: Das Paket im Tauschordner ist nicht das erwartete. Nichts ausgefuehrt.''};'
+        '$t="$env:TEMP\ServerMigration-"+[guid]::NewGuid().ToString(''N'');[void](New-Item -ItemType Directory $t);$z="$t\p.zip";[IO.File]::WriteAllBytes($z,$b);'
+        'Expand-Archive $z $t;Set-ExecutionPolicy Bypass -Scope Process -Force -EA 0;'
         '& "$t\ServerMigration\server\Start-SmServer.ps1" -ShareLink $L__EXTRA__}'
     ) -join ''
-    $t.Replace('__LINK__', $l).Replace('__SHA__', $Sha256).Replace('__PKG__', $script:SmPackageName).Replace('__EXTRA__', $extra)
+    $t.Replace('__HOSTCHECK__', $hostCheck).Replace('__LINK__', $l).Replace('__SHA__', $Sha256).Replace('__PKG__', $script:SmPackageName).Replace('__EXTRA__', $extra)
 }
 
 function Publish-SmServerPackage {
@@ -108,6 +113,5 @@ function Publish-SmServerPackage {
     $pkg = New-SmServerPackage -RepoRoot $RepoRoot -OutDir $OutDir
     $remote = Send-SmShareFile -Share $Share -Path $pkg.Path -Progress $Progress
     $line = New-SmOneLiner -Link $Share.Link -Sha256 $pkg.Sha256 -AnyHost:$AnyHost
-    [IO.File]::WriteAllText((Join-Path $OutDir 'Einzeiler.txt'), $line + "`r`n", [Text.Encoding]::ASCII)
     [pscustomobject]@{ Package = $pkg; Remote = $remote; OneLiner = $line }
 }

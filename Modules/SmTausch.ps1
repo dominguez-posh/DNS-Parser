@@ -45,7 +45,7 @@ function Format-SmSpString {
 
 function Connect-SmShare {
     <# Oeffnet den Tauschordner ueber den Freigabelink. Liefert ein Objekt mit Web, Folder und Session. #>
-    param([Parameter(Mandatory)][string]$Link)
+    param([Parameter(Mandatory)][string]$Link, [switch]$AnyHost)   # AnyHost nur fuer Tests: Ziel muss derselbe Host wie der Link sein
     Initialize-SmWeb
     try {
         $r = Invoke-WebRequest -Uri $Link -UseBasicParsing -SessionVariable shareSession -MaximumRedirection 10 -ErrorAction Stop
@@ -54,6 +54,8 @@ function Connect-SmShare {
         throw ("Der Tauschordner ist nicht erreichbar: {0}. Hat der Server Internetzugang zu *.sharepoint.com? Ist der Link noch gueltig?" -f $_.Exception.Message)
     }
     $final = Get-SmFinalUri $r
+    $okHost = if ($AnyHost) { $final -and $final.Authority -eq ([uri]$Link).Authority } else { $final -and $final.Scheme -eq 'https' -and $final.Host -match '^[A-Za-z0-9-]+\.sharepoint\.com$' }
+    if (-not $okHost) { throw 'Der Freigabelink leitet auf ein unerlaubtes Ziel weiter (erlaubt: https auf *.sharepoint.com). Abgebrochen.' }
     $folder = Resolve-SmShareFolder -FinalUri $final -Content $r.Content
     if (-not $folder) {
         throw ("Der Link fuehrt nicht zu einem Ordner ({0}). Bitte einen Ordner mit 'Jeder mit dem Link' und 'Bearbeiten' teilen und den Ordnerlink verwenden." -f $final)
