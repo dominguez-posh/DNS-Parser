@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Checks fuer Phase 1: Syntax und Analyse aller Scripts, beide Fenster mit -ParseOnly (hell und dunkel),
@@ -289,6 +289,15 @@ finally {
 Write-Host ''
 Write-Host '--- Projektliste (tests\Test-Projekte.ps1)'
 $script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Projekte.ps1') -Repo $repo -Work $work)[-1])
+# ---------------------------------------------------------------- 5. DNS (Phase 3): Parser, Auswertung, Server-Funktionen, Geschwindigkeit
+$dnsOut = Join-Path $work 'test-dns.txt'
+$ErrorActionPreference = 'Continue'
+& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $repo 'tests\Test-Dns.ps1') *> $dnsOut
+$dnsCode = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+foreach ($l in (Get-Content -LiteralPath $dnsOut)) { if ($l -match '^(OK|FAIL|INFO) ') { Write-Host $l } }
+Check "Test-Dns.ps1: Exitcode $dnsCode (0 = keine Fehler)" ($dnsCode -eq 0)
+
 Write-Host ''
 Write-Host "$script:fails Fehler"
 exit $script:fails

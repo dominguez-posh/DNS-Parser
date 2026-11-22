@@ -25,7 +25,10 @@ $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmTausch.ps1')
 . (Join-Path $root 'Modules\SmPaket.ps1')
 . (Join-Path $root 'Modules\SmProjekte.ps1')
+. (Join-Path $root 'Modules\SmDns.ps1')
+. (Join-Path $root 'Modules\SmDnsUi.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'), (Join-Path $root 'Modules\SmProjekte.ps1'))
+$dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDns.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
@@ -80,7 +83,7 @@ $startPage = @'
 $pages = @(
     @{ Key = 'Start'; Title = 'Tauschordner'; Glyph = 0xE753; Xaml = $startPage }
     @{ Key = 'Projekte'; Title = 'Projekte'; Glyph = 0xE8F1; Xaml = (Get-SmProjectPageXaml -Root $root) }
-    @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Phase = 3; Text = 'Logging einschalten, Logs sammeln, Clients und DNS-Server auswerten.' }
+    @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\Dns.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Phase = 4; Text = 'Bereiche, Reservierungen und Leases exportieren, importieren und vergleichen.' }
     @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Phase = 5; Text = 'Drucker, Treiber und Ports exportieren und importieren, Zugriffe auswerten.' }
     @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Phase = 6; Text = 'FSMO-Rollen, DSRM-Kennwort, Funktionsebenen und Schema mit Vorprüfungen.' }
@@ -88,11 +91,13 @@ $pages = @(
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Berater-Tool' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
 Test-SmWindowNames @('TxtLink', 'BtnConnect', 'TxtShareState', 'TxtFiles', 'BtnPublish', 'TxtProgress', 'PrgUpload', 'BoxOneLiner', 'TxtOneLiner', 'BtnCopy', 'TxtSha', 'TxtLog',
+    'BtnDnsFind', 'BtnDnsLoad', 'BtnDnsOpen', 'BtnDnsCancel', 'LstDnsZips', 'CmbDnsDate', 'ChkDnsReverse', 'PrgDnsLoad', 'TxtDnsLoad', 'TxtDnsPeriod', 'CmbDnsView', 'TxtDnsFilter', 'BtnDnsApply', 'BtnDnsExport', 'GrdDns', 'TxtDnsCount',
     'NavStart', 'NavProjekte', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 Test-SmWindowNames (Get-SmProjectUiNames)
+$script:Share = $null
+Register-SmDnsPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 if ($ParseOnly) { 'PARSE OK'; return }
 
-$script:Share = $null
 function Add-Log([string]$Line) {
     $ui.TxtLog.AppendText(('{0:HH:mm:ss}  {1}' -f (Get-Date), $Line) + "`r`n")
     $ui.TxtLog.ScrollToEnd()

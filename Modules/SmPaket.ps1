@@ -13,7 +13,7 @@ $script:SmPackageRoot = 'ServerMigration'
 # Dateien, die das Server-Fenster braucht (relativ zur Wurzel des Repos)
 $script:SmServerFiles = @(
     'server/Start-SmServer.ps1', 'Modules/SmTheme.ps1', 'Modules/SmShell.ps1', 'Modules/SmTausch.ps1',
-    'UI/Theme.xaml', 'UI/Shell.xaml'
+    'server/SmDnsServer.ps1', 'UI/Theme.xaml', 'UI/Shell.xaml', 'UI/DnsServer.xaml'
 )
 
 function Test-SmShareLink {

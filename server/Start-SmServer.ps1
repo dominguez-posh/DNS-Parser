@@ -24,7 +24,9 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $root 'Modules\SmTheme.ps1')
 . (Join-Path $root 'Modules\SmShell.ps1')
 . (Join-Path $root 'Modules\SmTausch.ps1')
+. (Join-Path $root 'server\SmDnsServer.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'))
+$dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
@@ -59,7 +61,7 @@ $startPage = @'
 
 $pages = @(
     @{ Key = 'Start'; Title = 'Dieser Server'; Glyph = 0xE977; Xaml = $startPage }
-    @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Phase = 3; Text = 'Logging einschalten, Logs sammeln und in den Tauschordner legen.' }
+    @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\DnsServer.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Phase = 4; Text = 'Export und Import von Bereichen, Reservierungen und Leases.' }
     @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Phase = 5; Text = 'Export und Import von Druckern, Treibern und Ports, Zugriffsprotokoll.' }
     @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Phase = 6; Text = 'FSMO-Rollen, DSRM-Kennwort, Funktionsebenen und Schema mit Vorprüfungen.' }
@@ -67,6 +69,7 @@ $pages = @(
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Server-Fenster' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
 Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'TxtFiles', 'BtnUpload', 'TxtProgress', 'PrgUpload', 'TxtLog',
+    'TxtDnsState', 'TxtDnsDetail', 'BtnDnsRefresh', 'BoxDnsEnable', 'TxtDnsPath', 'TxtDnsMax', 'BtnDnsEnable', 'BoxDnsOn', 'BtnDnsDisable', 'BoxDnsLogs', 'TxtDnsLogInfo', 'BtnDnsUpload', 'TxtDnsProgress', 'PrgDns',
     'NavStart', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 if ($ParseOnly) { 'PARSE OK'; return }
 
@@ -133,6 +136,7 @@ $ui.BtnUpload.Add_Click({
     })
 
 if (-not $ShareLink) { Add-Log 'Kein Tauschordner angegeben (nur lokal).' }
+Register-SmDnsServerPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Select-SmPage 'Start'
 Update-Share
 [void]$w.Window.ShowDialog()
