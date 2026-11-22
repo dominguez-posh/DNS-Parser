@@ -59,7 +59,7 @@
                         </StackPanel>
                         <CheckBox x:Name="ChkAdSeizeGone" Content="Der alte Inhaber ist dauerhaft entfernt und kommt nie wieder ans Netz" Margin="0,10,0,0" AutomationProperties.Name="Der alte Inhaber ist dauerhaft entfernt"/>
                         <TextBlock Text="Zur Bestätigung den Rollennamen genau so tippen" Style="{DynamicResource SmallLabel}" Margin="0,8,0,2"/>
-                        <TextBox x:Name="TxtAdSeizeConfirm" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" AutomationProperties.Name="Rollenname zur Bestätigung"/>
+                        <TextBox x:Name="TxtAdSeizeConfirm" Padding="8,6" Width="320" HorizontalAlignment="Left" AutomationProperties.Name="Rollenname zur Bestätigung"/>
                         <Button x:Name="BtnAdSeize" Content="Rolle übernehmen (Seize) …" Style="{DynamicResource DangerGhost}" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                     </StackPanel>
                 </Border>
@@ -71,15 +71,15 @@
                 <TextBlock Text="3  DSRM-Kennwort" Style="{DynamicResource CardTitle}"/>
                 <RadioButton x:Name="RbAdDsrmSync" Content="Mit Domänenkonto synchronisieren (empfohlen, das Tool berührt kein Kennwort; am besten ein eigenes, deaktiviertes Konto)" GroupName="Dsrm" Margin="0,8,0,0"/>
                 <TextBlock Text="Domänenkonto (nur dieser Server, einmalig)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
-                <TextBox x:Name="TxtAdDsrmAccount" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänenkonto für die Synchronisierung"/>
+                <TextBox x:Name="TxtAdDsrmAccount" Padding="8,6" Width="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänenkonto für die Synchronisierung"/>
                 <RadioButton x:Name="RbAdDsrmPwd" Content="Neues Kennwort setzen" GroupName="Dsrm" Margin="0,14,0,0"/>
                 <TextBlock Style="{DynamicResource Hint}" Margin="22,4,0,4" TextWrapping="Wrap" Text="Das Kennwort geht nur über die Standardeingabe an ntdsutil und wird nirgends gespeichert, protokolliert oder hochgeladen. Mindestens 12 Zeichen, drei von vier Zeichenarten. Variante B muss im Labor geprüft werden: Nimmt ntdsutil das Kennwort nicht an, bitte die Variante Synchronisieren nutzen."/>
                 <TextBlock Text="Domänencontroller (leer = dieser Server)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
-                <TextBox x:Name="TxtAdDsrmDc" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänencontroller für das DSRM-Kennwort"/>
+                <TextBox x:Name="TxtAdDsrmDc" Padding="8,6" Width="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänencontroller für das DSRM-Kennwort"/>
                 <TextBlock Text="Neues Kennwort" Style="{DynamicResource SmallLabel}" Margin="22,8,0,2"/>
-                <PasswordBox x:Name="PwdAdDsrm1" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="Neues DSRM-Kennwort"/>
+                <PasswordBox x:Name="PwdAdDsrm1" Padding="8,6" Width="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="Neues DSRM-Kennwort"/>
                 <TextBlock Text="Noch einmal" Style="{DynamicResource SmallLabel}" Margin="22,8,0,2"/>
-                <PasswordBox x:Name="PwdAdDsrm2" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="DSRM-Kennwort wiederholen"/>
+                <PasswordBox x:Name="PwdAdDsrm2" Padding="8,6" Width="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="DSRM-Kennwort wiederholen"/>
                 <Button x:Name="BtnAdDsrm" Content="DSRM-Kennwort ändern …" Style="{DynamicResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,14,0,0"/>
                 <TextBox x:Name="TxtAdDsrmOut" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="120" VerticalScrollBarVisibility="Auto" FontSize="12"/>
             </StackPanel>
@@ -95,7 +95,7 @@
                     <Button x:Name="BtnAdLevelCheck" Content="Ebenen lesen / Vorprüfung"/>
                 </StackPanel>
                 <TextBlock Text="Name der Domäne bzw. Gesamtstruktur tippen (z. B. contoso.local)" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
-                <TextBox x:Name="TxtAdLevelConfirm" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" AutomationProperties.Name="Name zur Bestätigung"/>
+                <TextBox x:Name="TxtAdLevelConfirm" Padding="8,6" Width="320" HorizontalAlignment="Left" AutomationProperties.Name="Name zur Bestätigung"/>
                 <Button x:Name="BtnAdLevelRaise" Content="Ebene anheben (nicht umkehrbar) …" Style="{DynamicResource DangerGhost}" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                 <TextBox x:Name="TxtAdLevelOut" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="240" VerticalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
             </StackPanel>
