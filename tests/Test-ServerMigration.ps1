@@ -285,6 +285,10 @@ finally {
     try { [void]$server.EndInvoke($serverHandle) } catch { }
     $server.Dispose(); $rs.Dispose()
 }
+# ---------------------------------------------------------------- 5. Phase 2: Projektliste (eigene Datei)
+Write-Host ''
+Write-Host '--- Projektliste (tests\Test-Projekte.ps1)'
+$script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Projekte.ps1') -Repo $repo -Work $work)[-1])
 Write-Host ''
 Write-Host "$script:fails Fehler"
 exit $script:fails

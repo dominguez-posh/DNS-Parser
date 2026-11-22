@@ -1,0 +1,85 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
+    <!-- Seite "Projekte" (Phase 2). Logik: Modules\SmProjekte.ps1 -->
+    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
+        <TextBlock Text="Projekte" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Alle Projekte stehen in einer verschlüsselten Datei im Ordner, den der Freigabelink öffnet. Ohne Kennwort ist sie nicht lesbar."/>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="Projektliste verbinden" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Freigabelink des Ordners mit der Projektliste (Jeder mit dem Link kann bearbeiten) und das Kennwort der Liste. Das Kennwort bleibt im Speicher."/>
+                <TextBlock Text="Freigabelink des Ordners" Style="{DynamicResource SmallLabel}"/>
+                <TextBox x:Name="TxtListLink" Padding="8,6" AutomationProperties.Name="Freigabelink des Ordners mit der Projektliste"/>
+                <TextBlock Text="Kennwort der Liste" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <PasswordBox x:Name="PwdList" Padding="8,6" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="Kennwort der Projektliste"/>
+                <CheckBox x:Name="ChkRemember" Content="Kennwort auf diesem Rechner merken (Windows-Schutz, nur dieser Benutzer)" Margin="0,10,0,0"/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="BtnListConnect" Content="Verbinden" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnListNew" Content="Neue Liste anlegen" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnListReload" Content="Neu laden" IsEnabled="False" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnForget" Content="Gemerkte Verbindung löschen" Style="{DynamicResource LinkButton}" Visibility="Collapsed"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtListState" Text="Nicht verbunden" Foreground="{DynamicResource MutedText}" Margin="0,10,0,0"/>
+                <Border x:Name="BoxConflict" Visibility="Collapsed" Background="{DynamicResource WarningBg}" CornerRadius="6" Padding="12,10" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock x:Name="TxtConflict" Foreground="{DynamicResource Warning}" TextWrapping="Wrap" FontWeight="SemiBold"/>
+                        <Button x:Name="BtnConflictReload" Content="Neu laden" Margin="0,8,0,0" HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="Projekte" Style="{DynamicResource CardTitle}"/>
+                <TextBlock x:Name="TxtActive" Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Kein aktives Projekt gewählt."/>
+                <TextBox x:Name="TxtSearch" Padding="8,6" AutomationProperties.Name="Projekte suchen"/>
+                <TextBlock Text="Suche in Name, Kunde, Notizen, Status und Servernamen" Style="{DynamicResource SmallLabel}" Margin="0,4,0,8"/>
+                <Border BorderBrush="{DynamicResource Divider}" BorderThickness="1" CornerRadius="6" MinHeight="60">
+                    <Grid>
+                        <ListBox x:Name="LstProjects" Style="{DynamicResource PlainList}" MaxHeight="280" AutomationProperties.Name="Projektliste"/>
+                        <TextBlock x:Name="TxtListEmpty" Style="{DynamicResource Hint}" Margin="14,12" Text="Noch keine Projektliste verbunden."/>
+                    </Grid>
+                </Border>
+                <WrapPanel Margin="0,12,0,0">
+                    <Button x:Name="BtnProjNew" Content="Neues Projekt" Style="{DynamicResource PrimaryButton}" IsEnabled="False" Margin="0,0,8,6"/>
+                    <Button x:Name="BtnProjEdit" Content="Bearbeiten" IsEnabled="False" Margin="0,0,8,6"/>
+                    <Button x:Name="BtnProjDelete" Content="Löschen" Style="{DynamicResource DangerGhost}" IsEnabled="False" Margin="0,0,8,6"/>
+                    <Button x:Name="BtnProjActivate" Content="Als aktives Projekt wählen" IsEnabled="False" Margin="0,0,8,6"/>
+                    <Button x:Name="BtnProjExport" Content="Exportieren" IsEnabled="False" Margin="0,0,8,6"/>
+                    <Button x:Name="BtnProjImport" Content="Importieren" IsEnabled="False" Margin="0,0,8,6"/>
+                </WrapPanel>
+            </StackPanel>
+        </Border>
+
+        <Border x:Name="BoxEditor" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16" Visibility="Collapsed">
+            <StackPanel>
+                <TextBlock x:Name="TxtEditorTitle" Text="Projekt" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Text="Name" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtName" Padding="8,6" MaxLength="100" AutomationProperties.Name="Projektname"/>
+                <TextBlock Text="Kunde" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtCustomer" Padding="8,6" MaxLength="100" AutomationProperties.Name="Kunde"/>
+                <TextBlock Text="Status" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <ComboBox x:Name="CmbStatus" HorizontalAlignment="Left" MinWidth="200" AutomationProperties.Name="Status"/>
+                <TextBlock Text="Tauschordner-Link dieses Projekts" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtShare" Padding="8,6" AutomationProperties.Name="Tauschordner-Link"/>
+                <TextBlock Text="Notizen" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtNotes" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Notizen"/>
+                <TextBlock Text="Server" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <ListBox x:Name="LstServers" MaxHeight="120" Margin="0,0,0,6" AutomationProperties.Name="Server des Projekts"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBox x:Name="TxtSrvName" Width="220" Padding="8,6" Margin="0,0,8,0" AutomationProperties.Name="Servername"/>
+                    <ComboBox x:Name="CmbSrvRole" Width="100" Margin="0,0,8,0" AutomationProperties.Name="Rolle"/>
+                    <ComboBox x:Name="CmbSrvGen" Width="80" Margin="0,0,8,0" AutomationProperties.Name="alt oder neu"/>
+                    <Button x:Name="BtnSrvAdd" Content="Hinzufügen" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnSrvRemove" Content="Entfernen"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtEditorError" Foreground="{DynamicResource DangerText}" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="BtnProjSave" Content="Speichern" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnProjCancel" Content="Abbrechen"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</ScrollViewer>

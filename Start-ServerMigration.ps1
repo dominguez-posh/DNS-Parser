@@ -24,7 +24,8 @@ $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmShell.ps1')
 . (Join-Path $root 'Modules\SmTausch.ps1')
 . (Join-Path $root 'Modules\SmPaket.ps1')
-$jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'))
+. (Join-Path $root 'Modules\SmProjekte.ps1')
+$jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'), (Join-Path $root 'Modules\SmProjekte.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
@@ -78,7 +79,7 @@ $startPage = @'
 
 $pages = @(
     @{ Key = 'Start'; Title = 'Tauschordner'; Glyph = 0xE753; Xaml = $startPage }
-    @{ Key = 'Projekte'; Title = 'Projekte'; Glyph = 0xE8F1; Phase = 2; Text = 'Alle Projekte in einer verschlüsselten Datei, einzelne Projekte exportieren und importieren.' }
+    @{ Key = 'Projekte'; Title = 'Projekte'; Glyph = 0xE8F1; Xaml = (Get-SmProjectPageXaml -Root $root) }
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Phase = 3; Text = 'Logging einschalten, Logs sammeln, Clients und DNS-Server auswerten.' }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Phase = 4; Text = 'Bereiche, Reservierungen und Leases exportieren, importieren und vergleichen.' }
     @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Phase = 5; Text = 'Drucker, Treiber und Ports exportieren und importieren, Zugriffe auswerten.' }
@@ -88,6 +89,7 @@ $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Berater-Tool'
 $ui = $w.Ui
 Test-SmWindowNames @('TxtLink', 'BtnConnect', 'TxtShareState', 'TxtFiles', 'BtnPublish', 'TxtProgress', 'PrgUpload', 'BoxOneLiner', 'TxtOneLiner', 'BtnCopy', 'TxtSha', 'TxtLog',
     'NavStart', 'NavProjekte', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
+Test-SmWindowNames (Get-SmProjectUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
 
 $script:Share = $null
@@ -151,6 +153,12 @@ $ui.BtnPublish.Add_Click({
 $ui.BtnCopy.Add_Click({
         if ($ui.TxtOneLiner.Text) { [System.Windows.Clipboard]::SetText($ui.TxtOneLiner.Text); Show-SmToast 'Einzeiler kopiert.' }
     })
+
+# aktives Projekt: sein Tauschordner-Link kommt in die Seite Tauschordner (verbunden wird per Klick)
+Initialize-SmProjectPage -Ui $ui -JobModules $jobModules -AddLog ${function:Add-Log} -OnActiveChanged {
+    param($project)
+    if ($project -and $project['ShareLink']) { $ui.TxtLink.Text = [string]$project['ShareLink']; $ui.TxtShareState.Text = 'Link aus dem Projekt übernommen, bitte Verbinden'; Add-Log ('Tauschordner-Link aus Projekt: ' + $project['Name']) }
+}
 
 Select-SmPage 'Start'
 [void]$w.Window.ShowDialog()
