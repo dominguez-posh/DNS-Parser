@@ -18,6 +18,7 @@ $script:SmWevtutilPath = $null      # nur fuer Tests: Stub statt wevtutil.exe
 $script:SmPrintBrmTimeoutSec = 7200
 $script:SmPrintMaxExportBytes = 8GB
 $script:SmPrintExportPattern = '^[\w.\-]+\.printerExport$'
+$script:SmPrintWorkPattern = '^Import-[0-9a-f]{32}$'   # Arbeitsverzeichnis des Imports im gehaerteten Ordner
 $script:SmPrintStateFile = 'Druckprotokoll-Zustand.json'
 $script:SmPrintAuditFile = 'Protokoll.log'
 
@@ -258,11 +259,17 @@ function Receive-SmPrintShareFile {
     $log = New-Object System.Collections.ArrayList
     $folder = Initialize-SmPrintFolder
     $path = Resolve-SmPrintFile -Folder $folder -Name $Name -Pattern $Pattern
+    if (Test-Path -LiteralPath $path) {   # aeltere Datei (koennte vor dem ersten Haerten von einem Nicht-Administrator stammen): nie verwenden, neu laden
+        $old = Get-Item -LiteralPath $path -Force
+        if ($old.PSIsContainer -or ($old.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Im Sicherungsordner liegt eine Verknuepfung oder ein Ordner statt der Datei: $Name" }
+        Remove-Item -LiteralPath $path -Force
+    }
     $remote = @(Get-SmShareFiles -Share $Share | Where-Object Name -eq $Name)
     if (-not $remote) { throw "Die Datei $Name ist nicht im Tauschordner." }
     if ($remote[0].Length -gt $MaxBytes) { throw ('Datei zu gross ({0}, erlaubt {1}).' -f (Format-SmSize $remote[0].Length), (Format-SmSize $MaxBytes)) }
     if ((Get-SmFreeBytes -Path $folder) -lt (2 * $remote[0].Length + 100MB)) { throw 'Zu wenig freier Platz fuer den Download.' }
-    Receive-SmShareFile -Share $Share -Name $Name -OutFile $path
+    Receive-SmShareFile -Share $Share -Name $Name -OutFile $path -MaxBytes $MaxBytes
+    if (-not (Test-SmPrintTrustedFile -Path $path)) { throw "Die heruntergeladene Datei $Name gehoert keinem Administrator oder ist eine Verknuepfung, abgebrochen." }
     if ((Get-Item -LiteralPath $path).Length -ne $remote[0].Length) { throw "Die heruntergeladene Datei $Name ist unvollstaendig." }
     $sha = Get-SmPrintFileHash -Path $path
     Add-SmPrintAudit -Folder $folder -Log $log -Line ('Heruntergeladen: {0} ({1}), SHA256 {2}' -f $Name, (Format-SmSize $remote[0].Length), $sha)
@@ -303,13 +310,32 @@ function Copy-SmPrintHashed {
     $h
 }
 
-function Remove-SmPrintTemp {
-    <# Loescht das Arbeitsverzeichnis %TEMP%\ServerMigration-print-<GUID>, aber nur, wenn der Pfad genau diese Form hat (GetFullPath-Pruefung). #>
+function Test-SmPrintTrustedFile {
+    <# Datei im Sicherungsordner: normale Datei (keine Verknuepfung) und Besitzer Administratoren oder SYSTEM. Sonst $false (aeltere Dateien eines Nicht-Administrators werden nicht verwendet). #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $it = Get-Item -LiteralPath $Path -Force
+    if ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+    try { $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { return $false }
+    $owner -in @(Get-SmDnsStateSids)
+}
+
+function Get-SmPrintStreamHash {
+    <# SHA256 (gross) der Bytes eines offenen, lesbaren Streams ab Anfang. #>
+    param([Parameter(Mandatory)][IO.Stream]$Stream)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { [void]$Stream.Seek(0, 'Begin'); $h = $sha.ComputeHash($Stream) } finally { $sha.Dispose() }
+    -join ($h | ForEach-Object { $_.ToString('X2') })
+}
+
+function Remove-SmPrintWork {
+    <# Loescht das Arbeitsverzeichnis <Sicherungsordner>\Import-<GUID>, aber nur, wenn der Pfad genau diese Form hat (GetFullPath-Pruefung) und keine Verknuepfung ist. #>
     param([string]$Path)
     if (-not $Path) { return }
     $full = [IO.Path]::GetFullPath($Path)
-    $base = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
-    if ($full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -and ([IO.Path]::GetFileName($full) -match '^ServerMigration-print-[0-9a-f]{32}$') -and (Test-Path -LiteralPath $full -PathType Container)) {
+    $base = [IO.Path]::GetFullPath((Get-SmPrintFolder)).TrimEnd('\') + '\'
+    if ($full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -and ([IO.Path]::GetFileName($full) -match $script:SmPrintWorkPattern) -and (Test-Path -LiteralPath $full -PathType Container)) {
+        if ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
         Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -333,22 +359,29 @@ function Initialize-SmPrintImportCore {
     <#
     .SYNOPSIS
         Bereitet den Import vor (aendert nichts am System): Die eingegebene SHA256 wird beim Kopieren der Exportdatei in ein neues
-        %TEMP%\ServerMigration-print-<GUID> gegen genau die kopierten Bytes geprueft, von dort wird auch importiert. Danach Vorpruefung
-        und Inhalt aus der Exportdatei (PrintBrm -Q), abgeglichen mit der Inventur des alten Servers.
-        Liefert einen Plan (Ok, Problems, Lines, Missing, TempRoot, TempFile, Sha256, Log).
+        Arbeitsverzeichnis <Sicherungsordner>\Import-<GUID> (gehaertet, nie %TEMP%) gegen genau die kopierten Bytes geprueft, von dort
+        wird auch importiert. Die Quelldatei muss einem Administrator gehoeren. Mit Inventur muss auch deren SHA256 passen
+        (-ExpectedInvSha eingegeben, -InventorySha berechnet). Danach Vorpruefung und Inhalt aus der Exportdatei (PrintBrm -Q).
+        Liefert einen Plan (Ok, Problems, Lines, Missing, WorkRoot, WorkFile, Sha256, Log).
     #>
-    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ExpectedSha, $OldInventory, [switch]$Force)
+    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ExpectedSha, $OldInventory, [string]$ExpectedInvSha = '', [string]$InventorySha = '', [switch]$Force)
     $log = New-Object System.Collections.ArrayList
     $expected = ConvertTo-SmShaNormal $ExpectedSha
+    if ($OldInventory -and -not (Test-SmShaMatch -Entered $ExpectedInvSha -Actual $InventorySha)) { throw 'Die SHA256 der Inventur stimmt nicht (die vollstaendige SHA256 der Inventur vom alten Server einfuegen). Nichts importiert.' }
     $folder = Initialize-SmPrintFolder
     $src = Resolve-SmPrintFile -Folder $folder -Name $FileName -Pattern $script:SmPrintExportPattern
-    $tmp = Join-Path $env:TEMP ('ServerMigration-print-' + [guid]::NewGuid().ToString('N'))
+    if (-not (Test-SmPrintTrustedFile -Path $src)) { throw 'Die Exportdatei im Sicherungsordner fehlt, ist eine Verknuepfung oder gehoert keinem Administrator. Nichts importiert.' }
+    $tmp = Join-Path $folder ('Import-' + [guid]::NewGuid().ToString('N'))
+    if (Test-Path -LiteralPath $tmp) { throw 'Das Arbeitsverzeichnis gibt es schon, abgebrochen.' }
     [void](New-Item -ItemType Directory -Path $tmp)
     try {
+        if ((Get-Item -LiteralPath $tmp -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Das Arbeitsverzeichnis ist eine Verknuepfung, abgebrochen.' }
+        $badAcl = @(Test-SmDnsStateDirAcl -Path $tmp)
+        if ($badAcl.Count) { throw ('Das Arbeitsverzeichnis ist nicht sicher, abgebrochen: ' + ($badAcl -join ' ')) }
         $dest = Join-Path $tmp $FileName
         $actual = Copy-SmPrintHashed -Source $src -Dest $dest
         if ($actual -ne $expected) { throw 'Die SHA256 stimmt nicht mit der Datei im Sicherungsordner ueberein. Nichts importiert.' }
-        Add-SmPrintAudit -Folder $folder -Log $log -Line ('Pruefsumme bestaetigt, Arbeitskopie erstellt: {0}, SHA256 {1}' -f $FileName, $actual)
+        Add-SmPrintAudit -Folder $folder -Log $log -Line ('Pruefsumme bestaetigt, Arbeitskopie im gehaerteten Ordner erstellt: {0}, SHA256 {1}{2}' -f $FileName, $actual, $(if ($OldInventory) { ', Inventur-SHA256 ' + $InventorySha + ' bestaetigt' } else { '' }))
         $pre = Test-SmPrintPrecheck -Mode Import -ExportFile $dest -OldInventory $OldInventory -Force:$Force
         $problems = New-Object System.Collections.ArrayList
         if (-not $pre.Ok) { [void]$problems.Add("Vorpruefung nicht bestanden:`r`n" + (Format-SmPrecheck $pre)) }
@@ -361,15 +394,15 @@ function Initialize-SmPrintImportCore {
         }
         [pscustomobject]@{
             Ok = ($problems.Count -eq 0); Problems = @($problems); Lines = $content.Lines; Missing = $missing; Precheck = (Format-SmPrecheck $pre)
-            FileName = $FileName; TempRoot = $tmp; TempFile = $dest; Sha256 = $actual; HasInventory = [bool]$OldInventory; Log = @($log)
+            FileName = $FileName; WorkRoot = $tmp; WorkFile = $dest; Sha256 = $actual; HasInventory = [bool]$OldInventory; Log = @($log)
         }
     }
-    catch { Remove-SmPrintTemp $tmp; throw }
+    catch { Remove-SmPrintWork $tmp; throw }
 }
 
 function Initialize-SmPrintImport {
-    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ExpectedSha, $OldInventory, [switch]$Force)
-    try { Initialize-SmPrintImportCore -FileName $FileName -ExpectedSha $ExpectedSha -OldInventory $OldInventory -Force:$Force }
+    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ExpectedSha, $OldInventory, [string]$ExpectedInvSha = '', [string]$InventorySha = '', [switch]$Force)
+    try { Initialize-SmPrintImportCore -FileName $FileName -ExpectedSha $ExpectedSha -OldInventory $OldInventory -ExpectedInvSha $ExpectedInvSha -InventorySha $InventorySha -Force:$Force }
     catch { Stop-SmPrintFailure -Action 'Import (Vorbereitung)' -ErrorRecord $_ }
 }
 
@@ -379,7 +412,7 @@ function Format-SmPrintImportConfirm {
     $head = @($Plan.Lines | Select-Object -First 25)
     $t = "Import mit PrintBrm starten?`r`n`r`nDatei: {0}`r`nSHA256 stimmt: {1}`r`n`r`nInhalt der Exportdatei (PrintBrm -Q, {2} Zeilen, erste {3}):`r`n{4}" -f $Plan.FileName, ($Plan.Sha256.Substring(0, 12) + '...'), @($Plan.Lines).Count, $head.Count, ($head -join "`r`n")
     $t += "`r`n`r`nFreigaben übernehmen: {0}`r`nIm Active Directory veröffentlichen: {1}`r`nVorhandene Drucker überschreiben: {2}`r`n" -f $(if ($Shares) { 'ja' } else { 'nein' }), $(if ($Publish) { 'ja' } else { 'nein' }), $(if ($Force) { 'JA (Namensgleiche werden ersetzt)' } else { 'nein' })
-    $t += "`r`n" + $(if ($Plan.HasInventory) { 'Inventur und Export stimmen überein.' } else { 'Keine Inventur zum Abgleich gewählt.' }) + "`r`nDer Import ändert Drucker, Treiber und Ports dieses Servers."
+    $t += "`r`n" + $(if ($Plan.HasInventory) { 'Abgleich: Die Druckernamen der Inventur (deren SHA256 bestätigt ist) kommen alle in der Exportdatei vor. Treiber, Ports und Einstellungen wurden nicht verglichen.' } else { 'Keine Inventur zum Abgleich gewählt.' }) + "`r`nDer Import ändert Drucker, Treiber und Ports dieses Servers."
     $t
 }
 
@@ -387,20 +420,27 @@ function Invoke-SmPrintImportCore {
     <#
     .SYNOPSIS
         PrintBrm -R -F <Arbeitskopie> [-O FORCE] [-P ORIG]. Pflicht: Plan aus Initialize-SmPrintImport (Ok), -Confirmed.
-        Vor dem Start wird die Arbeitskopie erneut gehasht (dieselben Bytes wie bestaetigt). Danach wird das Arbeitsverzeichnis geloescht.
-        -KeepShares:$false: Danach werden die neu angelegten Drucker (und die der alten Inventur) nicht mehr freigegeben.
+        Die Arbeitskopie (im gehaerteten Ordner) wird auf Verknuepfung geprueft, dann wird ein Handle mit FileShare.Read geoeffnet und bis
+        zum Ende von PrintBrm -R gehalten (niemand kann sie ersetzen). Gehasht wird ueber dieses Handle (dieselben Bytes wie bestaetigt).
+        Danach wird das Arbeitsverzeichnis geloescht.
+        -KeepShares:$false: Danach werden nur die durch diesen Import NEU angelegten Drucker (Get-Printer vorher/nachher) nicht mehr freigegeben, nie bestehende.
     #>
     param([Parameter(Mandatory)]$Plan, [switch]$Confirmed, [switch]$Force, [switch]$Publish, [bool]$KeepShares = $true, $OldInventory)
+    $hold = $null
     try {
         if (-not $Confirmed) { throw 'Import nicht bestaetigt.' }
         if (-not $Plan -or -not $Plan.Ok) { throw 'Der Import ist nicht vorbereitet oder die Pruefung des Exports ist fehlgeschlagen.' }
         $log = New-Object System.Collections.ArrayList
         $folder = Initialize-SmPrintFolder
-        if ((Get-SmPrintFileHash -Path $Plan.TempFile) -ne $Plan.Sha256) { throw 'Die Arbeitskopie hat sich seit der Pruefung veraendert. Nichts importiert.' }
-        $pre = Test-SmPrintPrecheck -Mode Import -ExportFile $Plan.TempFile -OldInventory $OldInventory -Force:$Force
+        $root = [IO.Path]::GetFullPath([string]$Plan.WorkRoot); $file = [IO.Path]::GetFullPath([string]$Plan.WorkFile)
+        if (-not ([IO.Path]::GetFileName($root) -match $script:SmPrintWorkPattern) -or -not $root.StartsWith([IO.Path]::GetFullPath($folder).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or -not $file.StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Die Arbeitskopie liegt nicht im Arbeitsverzeichnis des Sicherungsordners. Nichts importiert.' }
+        foreach ($chk in $root, $file) { if (-not (Test-Path -LiteralPath $chk) -or ((Get-Item -LiteralPath $chk -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Arbeitsverzeichnis oder Arbeitskopie fehlt oder ist eine Verknuepfung. Nichts importiert.' } }
+        $hold = [IO.File]::Open($file, 'Open', 'Read', 'Read')   # bis zum Ende von PrintBrm offen: niemand kann die Datei aendern, ersetzen oder loeschen
+        if ((Get-SmPrintStreamHash -Stream $hold) -ne $Plan.Sha256) { throw 'Die Arbeitskopie hat sich seit der Pruefung veraendert. Nichts importiert.' }
+        $pre = Test-SmPrintPrecheck -Mode Import -ExportFile $Plan.WorkFile -OldInventory $OldInventory -Force:$Force
         if (-not $pre.Ok) { throw ("Vorpruefung nicht bestanden:`r`n" + (Format-SmPrecheck $pre)) }
         $before = @{}; foreach ($p in @(Get-Printer -ErrorAction SilentlyContinue)) { $before[([string]$p.Name).ToLowerInvariant()] = $true }
-        $brmArgs = @('-R', '-F', $Plan.TempFile)
+        $brmArgs = @('-R', '-F', $Plan.WorkFile)
         if ($Force) { $brmArgs += @('-O', 'FORCE') }
         if ($Publish) { $brmArgs += @('-P', 'ORIG') }
         Add-SmPrintAudit -Folder $folder -Log $log -Line ('Import gestartet: PrintBrm -R -F {0} (SHA256 {1}; Freigaben {2}, Veroeffentlichung {3}, Ueberschreiben {4})' -f $Plan.FileName, $Plan.Sha256, $(if ($KeepShares) { 'uebernehmen' } else { 'nicht uebernehmen' }), $(if ($Publish) { 'ja' } else { 'nein' }), $(if ($Force) { 'ja' } else { 'nein' }))
@@ -408,16 +448,16 @@ function Invoke-SmPrintImportCore {
         if ($r.ExitCode -ne 0) { throw ('PrintBrm meldet Exitcode {0}. Details im Ereignisprotokoll PrintBRM. {1}' -f $r.ExitCode, $r.Error) }
         Add-SmPrintAudit -Folder $folder -Log $log -Line 'Import fertig: Exitcode 0'
         if (-not $KeepShares) {
-            $names = @{}
-            foreach ($p in @(Get-Printer -ErrorAction SilentlyContinue)) { if (-not $before.ContainsKey(([string]$p.Name).ToLowerInvariant())) { $names[[string]$p.Name] = $true } }
-            if ($OldInventory) { foreach ($p in $OldInventory.Printers) { $names[$p.Name] = $true } }
-            $n = 0
-            foreach ($p in @(Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.Shared -and $names.ContainsKey([string]$_.Name) })) { Set-Printer -Name $p.Name -Shared $false -ErrorAction Stop; $n++ }
-            Add-SmPrintAudit -Folder $folder -Log $log -Line ('Freigaben entfernt (nicht uebernommen): {0} Drucker' -f $n)
+            $n = 0   # nur Drucker, die es vor dem Import nicht gab (Vorher-Nachher-Vergleich), nie bestehende
+            foreach ($p in @(Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.Shared -and -not $before.ContainsKey(([string]$_.Name).ToLowerInvariant()) })) { Set-Printer -Name $p.Name -Shared $false -ErrorAction Stop; $n++ }
+            Add-SmPrintAudit -Folder $folder -Log $log -Line ('Freigaben entfernt (nicht uebernommen): {0} neu angelegte Drucker, bestehende unveraendert' -f $n)
         }
         [pscustomobject]@{ ExitCode = $r.ExitCode; Log = @($log) }
     }
-    finally { if ($Plan) { Remove-SmPrintTemp $Plan.TempRoot } }
+    finally {
+        if ($hold) { $hold.Dispose() }
+        if ($Plan) { Remove-SmPrintWork $Plan.WorkRoot }
+    }
 }
 
 function Invoke-SmPrintImport {
@@ -563,10 +603,15 @@ function Get-SmPrintSnapshot {
 }
 
 function Invoke-SmPrintCollect {
-    <# Sammelt Ereignis 307 der letzten $Days Tage plus Sofortbild und schreibt eine JSON-Datei in den Sicherungsordner. #>
-    param([int]$Days = 90, [switch]$Pseudonymize, [string]$Salt = '')
+    <#
+    Sammelt Ereignis 307 der letzten $Days Tage plus Sofortbild und schreibt eine JSON-Datei in den Sicherungsordner.
+    -Pseudonymize: Benutzernamen als Benutzer-<12 Hex> (HMAC-SHA256 mit -Key, 64 Hexzeichen aus New-SmPseudonymKey); -PseudonymizeClients: auch Rechnernamen
+    (und Verbindungsadressen) als Rechner-<12 Hex>. Der Schluessel kommt nie in die Datei, den Tauschordner oder das Protokoll.
+    #>
+    param([int]$Days = 90, [switch]$Pseudonymize, [switch]$PseudonymizeClients, [Alias('Salt')][string]$Key = '')
     if ($Days -lt 1 -or $Days -gt 3650) { throw 'Tage: 1 bis 3650.' }
-    if ($Pseudonymize -and $Salt.Trim().Length -lt 8) { throw 'Pseudonyme brauchen einen Projekt-Salt mit mindestens 8 Zeichen.' }
+    if (($Pseudonymize -or $PseudonymizeClients) -and $Key -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Pseudonyme brauchen den zufaelligen Schluessel (64 Hexzeichen, wird im Fenster erzeugt).' }
+    if ($PseudonymizeClients -and -not $Pseudonymize) { throw 'Rechnernamen werden nur zusammen mit den Benutzernamen pseudonymisiert.' }
     $pre = Test-SmPrintPrecheck -Mode Log
     if (-not $pre.Ok) { throw ("Vorpruefung nicht bestanden:`r`n" + (Format-SmPrecheck $pre)) }
     $log = New-Object System.Collections.ArrayList
@@ -575,16 +620,23 @@ function Invoke-SmPrintCollect {
     $got = Get-SmPrintEvents -Since $since
     $snap = Get-SmPrintSnapshot
     $events = $got.Events
-    if ($Pseudonymize) {   # Benutzernamen sind personenbezogene Daten: Hash mit Projekt-Salt, der Salt kommt nicht in die Datei
-        $events = @($events | ForEach-Object { $e = $_.PSObject.Copy(); $e.User = Get-SmPseudonym -Value $e.User -Salt $Salt -HexLength 8; $e })
-        foreach ($x in @($snap.SmbSessions) + @($snap.OpenFiles)) { $x['User'] = Get-SmPseudonym -Value ([string]$x['User']) -Salt $Salt -HexLength 8 }
+    if ($Pseudonymize) {   # Benutzernamen sind personenbezogene Daten: HMAC-SHA256 mit zufaelligem Schluessel, der Schluessel kommt nicht in die Datei
+        $events = @($events | ForEach-Object {
+                $e = $_.PSObject.Copy(); $e.User = Get-SmPseudonym -Value $e.User -Key $Key -HexLength 12
+                if ($PseudonymizeClients) { $e.Client = Get-SmPseudonym -Value $e.Client -Key $Key -Prefix 'Rechner' -HexLength 12 }
+                $e })
+        foreach ($x in @($snap.SmbSessions) + @($snap.OpenFiles)) {
+            $x['User'] = Get-SmPseudonym -Value ([string]$x['User']) -Key $Key -HexLength 12
+            if ($PseudonymizeClients) { $x['Client'] = Get-SmPseudonym -Value ([string]$x['Client']) -Key $Key -Prefix 'Rechner' -HexLength 12 }
+        }
+        if ($PseudonymizeClients -and $snap.SpoolerConnections) { foreach ($x in @($snap.SpoolerConnections)) { $x['Remote'] = Get-SmPseudonym -Value ([string]$x['Remote']) -Key $Key -Prefix 'Rechner' -HexLength 12 } }
     }
-    $data = New-SmPrintAccessFile -Computer $env:COMPUTERNAME -Events $events -Snapshot $snap -RequestedFrom $since -Truncated $got.Truncated -Pseudonymized:$Pseudonymize
+    $data = New-SmPrintAccessFile -Computer $env:COMPUTERNAME -Events $events -Snapshot $snap -RequestedFrom $since -Truncated $got.Truncated -Pseudonymized:$Pseudonymize -ClientsPseudonymized:$PseudonymizeClients
     $name = 'Print-Zugriffe-{0}-{1}.json' -f (Get-SmSafeComputer), (Get-SmFileStamp)
     $path = Resolve-SmPrintFile -Folder $folder -Name $name
     Write-SmPrintJson -Data $data -Path $path
     $sha = Get-SmPrintFileHash -Path $path
-    Add-SmPrintAudit -Folder $folder -Log $log -Line ('Zugriffe gesammelt: {0} Ereignisse 307{1}, {2} SMB-Sitzungen, {3} offene Druckdateien, Benutzernamen {5}, SHA256 {4}' -f $data.Count, $(if ($got.Truncated) { ' (gekuerzt auf die neuesten)' } else { '' }), @($snap.SmbSessions).Count, @($snap.OpenFiles).Count, $sha, $(if ($Pseudonymize) { 'pseudonymisiert' } else { 'im Klartext' }))
+    Add-SmPrintAudit -Folder $folder -Log $log -Line ('Zugriffe gesammelt: {0} Ereignisse 307{1}, {2} SMB-Sitzungen, {3} offene Druckdateien, Benutzernamen {5}, Rechnernamen {6}, SHA256 {4}' -f $data.Count, $(if ($got.Truncated) { ' (gekuerzt auf die neuesten)' } else { '' }), @($snap.SmbSessions).Count, @($snap.OpenFiles).Count, $sha, $(if ($Pseudonymize) { 'pseudonymisiert (HMAC)' } else { 'im Klartext' }), $(if ($PseudonymizeClients) { 'pseudonymisiert' } else { 'im Klartext' }))
     [pscustomobject]@{ Path = $path; Name = $name; Sha256 = $sha; Length = (Get-Item -LiteralPath $path).Length; Count = $data.Count; Log = @($log) }
 }
 
@@ -609,9 +661,9 @@ function Get-SmPrintServerPageXaml {
 
 function Get-SmPrintServerUiNames {
     @('RbPrOld', 'RbPrNew', 'TxtPrFolder', 'BoxPrOld', 'BoxPrNew', 'TxtPrCheck', 'BtnPrCheckExp', 'BtnPrExport', 'TxtPrExpSha', 'BtnPrShaCopy',
-        'CmbPrExportFile', 'CmbPrInvFile', 'BtnPrListShare', 'BtnPrDownload', 'TxtPrSha', 'TxtPrShaIn', 'ChkPrShares', 'ChkPrPublish', 'ChkPrForce', 'BtnPrCheckImp', 'BtnPrImport', 'BtnPrInventory',
+        'CmbPrExportFile', 'CmbPrInvFile', 'BtnPrListShare', 'BtnPrDownload', 'TxtPrSha', 'TxtPrShaIn', 'TxtPrInvShaIn', 'ChkPrShares', 'ChkPrPublish', 'ChkPrForce', 'BtnPrCheckImp', 'BtnPrImport', 'BtnPrInventory',
         'LstPrLocal', 'BtnPrLocalRefresh', 'BtnPrUpload', 'TxtPrUploadState',
-        'TxtPrLogStatus', 'TxtPrLogSize', 'BtnPrLogRefresh', 'BtnPrLogOn', 'BtnPrLogOff', 'TxtPrDays', 'ChkPrPseudo', 'TxtPrSalt', 'BtnPrCollect')
+        'TxtPrLogStatus', 'TxtPrLogSize', 'BtnPrLogRefresh', 'BtnPrLogOn', 'BtnPrLogOff', 'TxtPrDays', 'ChkPrPseudo', 'ChkPrPseudoClient', 'TxtPrKey', 'BtnPrKeyNew', 'BtnPrKeyCopy', 'BtnPrCollect')
 }
 
 function Initialize-SmPrintServerPage {
@@ -631,10 +683,10 @@ function Initialize-SmPrintServerPage {
     $Ui.RbPrOld.Add_Checked({ Update-SmPrintRole }); $Ui.RbPrNew.Add_Checked({ Update-SmPrintRole })
     $Ui.BtnPrCheckExp.Add_Click({ Show-SmPrintPrecheck -Mode Export })
     $Ui.BtnPrExport.Add_Click({ Start-SmPrintExportUi })
-    $Ui.BtnPrShaCopy.Add_Click({ $t = $script:SmPS.Ui.TxtPrExpSha.Text; if ($t) { [System.Windows.Clipboard]::SetText($t); Show-SmToast 'SHA256 kopiert.' } })
+    $Ui.BtnPrShaCopy.Add_Click({ $t = $script:SmPS.Ui.TxtPrExpSha.Text; if ($t) { [System.Windows.Clipboard]::SetText($t); Show-SmToast 'Beide SHA256 kopiert.' } })
     $Ui.BtnPrListShare.Add_Click({ Update-SmPrintShareLists })
     $Ui.BtnPrDownload.Add_Click({ Start-SmPrintDownloadUi })
-    $Ui.TxtPrShaIn.Add_TextChanged({ Update-SmPrintImportState })
+    $Ui.TxtPrShaIn.Add_TextChanged({ Update-SmPrintImportState }); $Ui.TxtPrInvShaIn.Add_TextChanged({ Update-SmPrintImportState })
     $Ui.BtnPrCheckImp.Add_Click({ Show-SmPrintPrecheck -Mode Import })
     $Ui.BtnPrImport.Add_Click({ Start-SmPrintImportUi })
     $Ui.BtnPrInventory.Add_Click({ Start-SmPrintInventoryUi })
@@ -644,6 +696,9 @@ function Initialize-SmPrintServerPage {
     $Ui.BtnPrLogOn.Add_Click({ Start-SmPrintLogSwitchUi -On })
     $Ui.BtnPrLogOff.Add_Click({ Start-SmPrintLogSwitchUi })
     $Ui.BtnPrCollect.Add_Click({ Start-SmPrintCollectUi })
+    $Ui.TxtPrKey.Text = New-SmPseudonymKey
+    $Ui.BtnPrKeyNew.Add_Click({ $script:SmPS.Ui.TxtPrKey.Text = New-SmPseudonymKey; Show-SmToast 'Neuer Schlüssel erzeugt.' })
+    $Ui.BtnPrKeyCopy.Add_Click({ $t = $script:SmPS.Ui.TxtPrKey.Text; if ($t) { [System.Windows.Clipboard]::SetText($t); Show-SmToast 'Schlüssel kopiert. Sicher aufbewahren, er steht in keiner Datei.' } })
     Update-SmPrintLocalList
     Update-SmPrintLogUi
 }
@@ -655,12 +710,21 @@ function Update-SmPrintRole {
     $u.BoxPrNew.Visibility = if ($old) { 'Collapsed' } else { 'Visible' }
 }
 
+function Get-SmPastedSha {
+    <# Eingefuegter Text fuer eine SHA256: nur die Pruefsumme oder der kopierte Zweizeiler ("Export: ..." und "Inventur: ..."); liefert den Teil zum Namen. #>
+    param([AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Label)
+    $m = [regex]::Match($Text, '(?im)^\s*' + [regex]::Escape($Label) + '[^:\r\n]*:\s*([0-9A-Fa-f \t]+)')
+    if ($m.Success) { $m.Groups[1].Value } else { $Text }
+}
+
 function Update-SmPrintImportState {
-    <# Der Import-Knopf ist nur an, wenn eine Datei heruntergeladen ist und die eingegebene SHA256 vollstaendig passt. #>
+    <# Der Import-Knopf ist nur an, wenn eine Datei heruntergeladen ist und die eingegebene SHA256 (bei gewaehlter Inventur auch deren SHA256) vollstaendig passt. #>
     $st = $script:SmPS; $u = $st.Ui
-    $match = [bool]($st.DlSha -and (Test-SmShaMatch -Entered $u.TxtPrShaIn.Text -Actual $st.DlSha))
-    $u.BtnPrImport.IsEnabled = ($match -and -not $st.Busy)
-    $u.TxtPrSha.Text = if (-not $st.DlSha) { 'Noch nichts heruntergeladen.' } elseif (-not $u.TxtPrShaIn.Text.Trim()) { 'Bitte die vollständige SHA256 vom alten Server einfügen.' } elseif ($match) { 'SHA256 stimmt.' } else { 'SHA256 stimmt nicht (oder ist unvollständig).' }
+    $match = [bool]($st.DlSha -and (Test-SmShaMatch -Entered (Get-SmPastedSha $u.TxtPrShaIn.Text 'Export') -Actual $st.DlSha))
+    $invNeeded = [bool]$st.OldInv
+    $invMatch = (-not $invNeeded) -or [bool]($st.InvSha -and (Test-SmShaMatch -Entered (Get-SmPastedSha $u.TxtPrInvShaIn.Text 'Inventur') -Actual $st.InvSha))
+    $u.BtnPrImport.IsEnabled = ($match -and $invMatch -and -not $st.Busy)
+    $u.TxtPrSha.Text = if (-not $st.DlSha) { 'Noch nichts heruntergeladen.' } elseif (-not $u.TxtPrShaIn.Text.Trim()) { 'Bitte die vollständige SHA256 des Exports vom alten Server einfügen.' } elseif (-not $match) { 'SHA256 des Exports stimmt nicht (oder ist unvollständig).' } elseif (-not $invNeeded) { 'SHA256 des Exports stimmt.' } elseif (-not $u.TxtPrInvShaIn.Text.Trim()) { 'Export stimmt. Bitte auch die SHA256 der Inventur einfügen.' } elseif (-not $invMatch) { 'Export stimmt, SHA256 der Inventur stimmt nicht (oder ist unvollständig).' } else { 'SHA256 von Export und Inventur stimmen.' }
 }
 
 function Set-SmPrintBusy([bool]$Busy) {
@@ -721,9 +785,9 @@ function Start-SmPrintExportUi {
     } -OnResult {
         param($r)
         $u = $script:SmPS.Ui
-        $u.TxtPrExpSha.Text = $r.Export.Sha256
+        $u.TxtPrExpSha.Text = ("Export: {0}`r`nInventur: {1}" -f $r.Export.Sha256, $r.Inventory.Sha256)
         $u.TxtPrUploadState.Text = 'Export fertig.'
-        $u.TxtPrCheck.Text = ("Export: {0} ({1})`r`nSHA256 {2}`r`nInventur: {3}`r`nDie SHA256 mit dem Knopf kopieren und am neuen Server vollständig einfügen. Danach hochladen." -f $r.Export.Name, (Format-SmSize $r.Export.Length), $r.Export.Sha256, $r.Inventory.Name)
+        $u.TxtPrCheck.Text = ("Export: {0} ({1})`r`nSHA256 {2}`r`nInventur: {3}`r`nSHA256 {4}`r`nBeide SHA256 mit dem Knopf kopieren und am neuen Server vollständig einfügen (Export und Inventur je in ihr Feld). Danach hochladen." -f $r.Export.Name, (Format-SmSize $r.Export.Length), $r.Export.Sha256, $r.Inventory.Name, $r.Inventory.Sha256)
         Update-SmPrintLocalList
     }
 }
@@ -751,23 +815,25 @@ function Start-SmPrintDownloadUi {
     $share = & $script:SmPS.GetShare
     if (-not $share) { $u.TxtPrCheck.Text = 'Kein Tauschordner verbunden.'; return }
     if (-not $u.CmbPrExportFile.SelectedItem) { $u.TxtPrCheck.Text = 'Keine Exportdatei im Tauschordner gewählt.'; return }
-    $script:SmPS.DlSha = $null; $script:SmPS.DlName = $null
+    $script:SmPS.DlSha = $null; $script:SmPS.DlName = $null; $script:SmPS.OldInv = $null; $script:SmPS.InvSha = $null
     $inv = if ($u.CmbPrInvFile.SelectedItem) { [string]$u.CmbPrInvFile.SelectedItem } else { $null }
     Start-SmPrintJobUi -What 'Download' -Params @{ Share = $share; Name = [string]$u.CmbPrExportFile.SelectedItem; Inv = $inv } -Script {
         param($State, $P)
         $exp = Receive-SmPrintShareFile -Share $P.Share -Name $P.Name
-        $invObj = $null; $log = @($exp.Log)
+        $invObj = $null; $invSha = $null; $log = @($exp.Log)
         if ($P.Inv) {
             $f = Receive-SmPrintShareFile -Share $P.Share -Name $P.Inv -Pattern '^Print-Inventur-[\w.\-]+\.json$' -MaxBytes 64MB
             $log += $f.Log
             $invObj = Read-SmPrintInventory -Path $f.Path
+            if ((Get-SmPrintFileHash -Path $f.Path) -ne $f.Sha256) { throw 'Die Inventur hat sich nach dem Herunterladen veraendert.' }
+            $invSha = $f.Sha256
         }
-        [pscustomobject]@{ Export = $exp; Inventory = $invObj; Log = $log }
+        [pscustomobject]@{ Export = $exp; Inventory = $invObj; InvSha = $invSha; Log = $log }
     } -OnResult {
         param($r)
         $u = $script:SmPS.Ui
-        $script:SmPS.OldInv = $r.Inventory; $script:SmPS.DlSha = $r.Export.Sha256; $script:SmPS.DlName = $r.Export.Name
-        $u.TxtPrCheck.Text = ("Heruntergeladen: {0} ({1}).`r`nDie berechnete SHA256 wird hier absichtlich nicht angezeigt. Bitte die vollständige SHA256 vom alten Server einfügen; erst bei vollständiger Übereinstimmung ist der Import-Knopf frei." -f $r.Export.Name, (Format-SmSize $r.Export.Length))
+        $script:SmPS.OldInv = $r.Inventory; $script:SmPS.InvSha = $r.InvSha; $script:SmPS.DlSha = $r.Export.Sha256; $script:SmPS.DlName = $r.Export.Name
+        $u.TxtPrCheck.Text = ("Heruntergeladen: {0} ({1}).`r`nDie berechnete SHA256 wird hier absichtlich nicht angezeigt. Bitte die vollständigen SHA256 vom alten Server einfügen (Export{2}); erst bei vollständiger Übereinstimmung ist der Import-Knopf frei." -f $r.Export.Name, (Format-SmSize $r.Export.Length), $(if ($r.Inventory) { ' und Inventur' } else { '' }))
         Update-SmPrintImportState
         Update-SmPrintLocalList
     }
@@ -775,24 +841,25 @@ function Start-SmPrintDownloadUi {
 
 function Start-SmPrintImportUi {
     $u = $script:SmPS.Ui; $st = $script:SmPS
-    if (-not $st.DlSha -or -not (Test-SmShaMatch -Entered $u.TxtPrShaIn.Text -Actual $st.DlSha)) { $u.TxtPrCheck.Text = 'Die SHA256 stimmt nicht. Nichts importiert.'; return }
+    $expSha = Get-SmPastedSha $u.TxtPrShaIn.Text 'Export'; $invSha = Get-SmPastedSha $u.TxtPrInvShaIn.Text 'Inventur'
+    if (-not $st.DlSha -or -not (Test-SmShaMatch -Entered $expSha -Actual $st.DlSha) -or ($st.OldInv -and -not ($st.InvSha -and (Test-SmShaMatch -Entered $invSha -Actual $st.InvSha)))) { $u.TxtPrCheck.Text = 'Die SHA256 stimmt nicht. Nichts importiert.'; return }
     $st.Force = [bool]$u.ChkPrForce.IsChecked; $st.Shares = [bool]$u.ChkPrShares.IsChecked; $st.Pub = [bool]$u.ChkPrPublish.IsChecked
     # Schritt 1: Arbeitskopie (gleiche Bytes wie geprueft), Vorpruefung und Inhalt der Exportdatei, noch ohne Aenderung am System
-    Start-SmPrintJobUi -What 'Import (Vorbereitung)' -Params @{ Name = $st.DlName; Sha = $u.TxtPrShaIn.Text; Inv = $st.OldInv; Force = $st.Force } -Script {
+    Start-SmPrintJobUi -What 'Import (Vorbereitung)' -Params @{ Name = $st.DlName; Sha = $expSha; Inv = $st.OldInv; InvSha = $st.InvSha; ExpInvSha = $invSha; Force = $st.Force } -Script {
         param($State, $P)
-        Initialize-SmPrintImport -FileName $P.Name -ExpectedSha $P.Sha -OldInventory $P.Inv -Force:$P.Force
+        Initialize-SmPrintImport -FileName $P.Name -ExpectedSha $P.Sha -OldInventory $P.Inv -ExpectedInvSha $P.ExpInvSha -InventorySha $P.InvSha -Force:$P.Force
     } -OnResult {
         param($plan)
         $st = $script:SmPS; $u = $st.Ui
         if (-not $plan.Ok) {
-            Remove-SmPrintTemp $plan.TempRoot
+            Remove-SmPrintWork $plan.WorkRoot
             $u.TxtPrCheck.Text = "Import nicht möglich:`r`n" + ($plan.Problems -join "`r`n")
             & $st.Log 'Import nicht gestartet: Prüfung nicht bestanden.'
             return
         }
         $u.TxtPrCheck.Text = "Vorprüfung bestanden.`r`n" + $plan.Precheck
         if (-not (Confirm-SmPrint (Format-SmPrintImportConfirm -Plan $plan -Shares $st.Shares -Publish $st.Pub -Force $st.Force) 'Import')) {
-            Remove-SmPrintTemp $plan.TempRoot
+            Remove-SmPrintWork $plan.WorkRoot
             & $st.Log 'Import vom Benutzer abgebrochen, Arbeitskopie gelöscht.'
             return
         }
@@ -886,15 +953,15 @@ function Start-SmPrintCollectUi {
     $u = $script:SmPS.Ui
     $days = 0
     if (-not [int]::TryParse($u.TxtPrDays.Text, [ref]$days) -or $days -lt 1 -or $days -gt 3650) { $u.TxtPrCheck.Text = 'Tage: eine ganze Zahl von 1 bis 3650.'; return }
-    $pseudo = [bool]$u.ChkPrPseudo.IsChecked; $salt = $u.TxtPrSalt.Text
-    if ($pseudo -and $salt.Trim().Length -lt 8) { $u.TxtPrCheck.Text = 'Für Pseudonyme bitte einen Projekt-Salt mit mindestens 8 Zeichen eingeben (für alle Sammlungen des Projekts derselbe).'; return }
+    $pseudo = [bool]$u.ChkPrPseudo.IsChecked; $pseudoC = ($pseudo -and [bool]$u.ChkPrPseudoClient.IsChecked); $key = $u.TxtPrKey.Text.Trim()
+    if ($pseudo -and $key -notmatch '^[0-9A-Fa-f]{64}$') { $u.TxtPrCheck.Text = 'Der Schlüssel für die Pseudonyme muss aus 64 Hexzeichen bestehen. Mit "Neuer Schlüssel" erzeugen; für alle Sammlungen des Projekts denselben verwenden.'; return }
     $pre = Test-SmPrintPrecheck -Mode Log
     if (-not $pre.Ok) { $u.TxtPrCheck.Text = "Vorprüfung nicht bestanden:`r`n" + (Format-SmPrecheck $pre); return }
-    $hint = "Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten.`r`nBenutzernamen: {0}.`r`nDie Datei liegt im gesicherten Ordner; hochgeladen wird erst auf Ihren Klick. Nach dem Projekt im Tauschordner und lokal löschen." -f $(if ($pseudo) { 'werden pseudonymisiert (Hash mit Projekt-Salt, der Salt steht nicht in der Datei)' } else { 'stehen im Klartext in der Datei' })
+    $hint = "Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten.`r`nBenutzernamen: {0}.`r`nRechnernamen: {1}.`r`nDie Datei liegt im gesicherten Ordner; hochgeladen wird erst auf Ihren Klick. Nach dem Projekt im Tauschordner und lokal löschen." -f $(if ($pseudo) { 'werden pseudonymisiert (HMAC-SHA256 mit dem zufälligen Schlüssel, der Schlüssel steht nicht in der Datei)' } else { 'stehen im Klartext in der Datei' }), $(if ($pseudoC) { 'werden ebenfalls pseudonymisiert' } else { 'stehen im Klartext in der Datei' })
     if (-not (Confirm-SmPrint ("Druckzugriffe der letzten {0} Tage sammeln?`r`n`r`n{1}" -f $days, $hint) 'Zugriffe sammeln')) { return }
-    Start-SmPrintJobUi -What 'Sammeln' -Params @{ Days = $days; Pseudo = $pseudo; Salt = $salt } -Script {
+    Start-SmPrintJobUi -What 'Sammeln' -Params @{ Days = $days; Pseudo = $pseudo; PseudoC = $pseudoC; Key = $key } -Script {
         param($State, $P)
-        Invoke-SmPrintCollect -Days $P.Days -Pseudonymize:$P.Pseudo -Salt $P.Salt
+        Invoke-SmPrintCollect -Days $P.Days -Pseudonymize:$P.Pseudo -PseudonymizeClients:$P.PseudoC -Key $P.Key
     } -OnResult {
         param($r)
         $script:SmPS.Ui.TxtPrCheck.Text = ("Gesammelt: {0} ({1} Ereignisse), SHA256 {2}`r`nZum Hochladen in der Liste wählen. Datenschutz: Die Datei enthält personenbezogene Daten." -f $r.Name, $r.Count, $r.Sha256)

@@ -114,8 +114,15 @@ $uEmpty = Get-SmPrintUsage -Events @() -Inventory $invOld
 Check 'ohne Ereignisse: alle Inventurdrucker ungenutzt, Zeitraum leer' (@($uEmpty.Unused).Count -eq 4 -and $uEmpty.Period.Count -eq 0 -and (Get-SmPrintPeriodText $uEmpty.Period) -match 'Keine Ereignisse')
 Check 'Zeitraumtext nennt Daten und warnt bei weniger als einem Monat' ((Get-SmPrintPeriodText $u.Period) -match '2026-10-01 bis 2026-11-11' -and (Get-SmPrintPeriodText (Get-SmPrintUsage -Events $events[0..2] -Inventory $invOld).Period) -match 'kuerzer als ein Monat')
 $m = Get-SmPrintUsage -Events $events -MaskUsers -Salt 'abc'
-Check 'Pseudonyme: keine Klarnamen in der Auswertung, gleicher Name gleiches Kuerzel' (-not (@($m.ByUser | ForEach-Object Name) -match 'anna|bernd|clara') -and (@($m.ByUser | ForEach-Object Name) -match '^Benutzer-[0-9A-F]{6}$').Count -eq 3 -and (Get-SmPseudonym -Value 'ANNA' -Salt 'abc') -eq (Get-SmPseudonym -Value 'anna' -Salt 'abc') -and (Get-SmPseudonym -Value 'anna' -Salt 'abc') -ne (Get-SmPseudonym -Value 'anna' -Salt 'xyz'))
+Check 'Pseudonyme: keine Klarnamen in der Auswertung, gleicher Name gleiches Kuerzel' (-not (@($m.ByUser | ForEach-Object Name) -match 'anna|bernd|clara') -and (@($m.ByUser | ForEach-Object Name) -match '^Benutzer-[0-9A-F]{12}$').Count -eq 3 -and (Get-SmPseudonym -Value 'ANNA' -Salt 'abc') -eq (Get-SmPseudonym -Value 'anna' -Salt 'abc') -and (Get-SmPseudonym -Value 'anna' -Salt 'abc') -ne (Get-SmPseudonym -Value 'anna' -Salt 'xyz'))
 Check 'Pseudonyme: Originalereignisse bleiben unveraendert' ($events[0].User -eq 'anna')
+$hk = New-SmPseudonymKey
+$hk2 = New-SmPseudonymKey
+Check 'Pseudonymschluessel: 64 Hexzeichen (32 Byte), zufaellig (zwei Aufrufe verschieden)' ($hk -match '^[0-9A-F]{64}$' -and $hk2 -match '^[0-9A-F]{64}$' -and $hk -ne $hk2)
+$hm = New-Object Security.Cryptography.HMACSHA256 (, [Text.Encoding]::UTF8.GetBytes($hk))
+$hx = -join ($hm.ComputeHash([Text.Encoding]::UTF8.GetBytes('anna')) | ForEach-Object { $_.ToString('X2') })
+Check 'Pseudonym: HMAC-SHA256 ueber den kleingeschriebenen Namen, 12 Hexzeichen, Praefix' ((Get-SmPseudonym -Value 'ANNA' -Key $hk) -eq ('Benutzer-' + $hx.Substring(0, 12)) -and (Get-SmPseudonym -Value 'anna' -Key $hk -Prefix 'Rechner') -eq ('Rechner-' + $hx.Substring(0, 12)))
+Check 'Pseudonym: anderer Schluessel anderes Kuerzel, ohne Schluessel nicht aus dem Namen ableitbar (kein einfaches SHA256 mit Salt)' ((Get-SmPseudonym -Value 'anna' -Key $hk) -ne (Get-SmPseudonym -Value 'anna' -Key $hk2) -and (Get-SmPseudonym -Value 'anna' -Key $hk) -ne ('Benutzer-' + (-join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($hk + '|anna')) | ForEach-Object { $_.ToString('X2') })).Substring(0, 12)))
 $dup = Merge-SmPrintEvents -Events ($events + $events)
 Check 'Zusammenfuehren mehrerer Zugriffsdateien entfernt Doppelte' (@($dup).Count -eq 6)
 
@@ -257,8 +264,16 @@ $script:roleOk = $true
 # Download aus dem Tauschordner (Funktionen des Tauschordners ersetzt)
 $script:remote = @([pscustomobject]@{ Name = 'Print-Export-PS-ALT-20261110-091500.printerExport'; Length = 12L })
 function Get-SmShareFiles { param($Share) $script:remote }
-function Receive-SmShareFile { param($Share, $Name, $OutFile) [IO.File]::WriteAllBytes($OutFile, [byte[]](1..12)) }
+$script:lastMax = $null
+function Receive-SmShareFile { param($Share, $Name, $OutFile, $MaxBytes) $script:lastMax = $MaxBytes; [IO.File]::WriteAllBytes($OutFile, [byte[]](1..12)) }
+$preOld = Join-Path $made 'Print-Export-PS-ALT-20261110-091500.printerExport'
+[IO.File]::WriteAllBytes($preOld, [byte[]](99, 99, 99))   # aeltere Datei im Ordner
 $dl = Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'Print-Export-PS-ALT-20261110-091500.printerExport'
+Check 'Download: Receive-SmShareFile bekommt -MaxBytes (Export 8 GB)' ($script:lastMax -eq 8GB)
+Check 'Download: aeltere Datei im Ordner wird nicht verwendet, sondern ersetzt (frischer Inhalt)' ((Get-Item -LiteralPath $dl.Path).Length -eq 12)
+[void](Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'Print-Export-PS-ALT-20261110-091500.printerExport' -MaxBytes 64MB)
+Check 'Download: -MaxBytes wird weitergegeben (Inventur 64 MB)' ($script:lastMax -eq 64MB)
+Check 'Vertrauenspruefung: Datei vom Administrator-Besitzer ok, anderer Besitzer und fehlende Datei nicht' ((Test-SmPrintTrustedFile -Path $dl.Path) -and -not (Test-SmPrintTrustedFile -Path (Join-Path $made 'gibt-es-nicht.json')) -and -not (& { $o = $script:SmDnsStateSidsOverride; $script:SmDnsStateSidsOverride = @('S-1-5-18'); try { Test-SmPrintTrustedFile -Path $dl.Path } finally { $script:SmDnsStateSidsOverride = $o } }))
 Check 'Download: Datei im Sicherungsordner, SHA256 berechnet, Protokollzeile' ((Test-Path $dl.Path) -and $dl.Sha256 -eq (Get-FileHash $dl.Path -Algorithm SHA256).Hash -and $dl.Log[0] -match 'Heruntergeladen')
 Check 'Download: Name ausserhalb der Whitelist abgelehnt' ((Throws { Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name '..\boese.printerExport' }) -and (Throws { Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'datei.exe' }))
 Check 'Download: Groessenlimit' (ThrowsLike { Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'Print-Export-PS-ALT-20261110-091500.printerExport' -MaxBytes 5 } 'zu gross')
@@ -267,7 +282,10 @@ Check 'Download: unvollstaendige Datei wird erkannt' (ThrowsLike { Receive-SmPri
 $script:freeBytes = 1MB
 Check 'Download: zu wenig Platz' (ThrowsLike { Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'Print-Export-PS-ALT-20261110-091500.printerExport' } 'Platz')
 $script:freeBytes = 100GB
+$script:remote = @([pscustomobject]@{ Name = 'Print-Export-PS-ALT-20261110-091500.printerExport'; Length = 12L })
+$dl = Receive-SmPrintShareFile -Share ([pscustomobject]@{}) -Name 'Print-Export-PS-ALT-20261110-091500.printerExport'   # frisch (ein fehlgeschlagener Download loescht die alte Datei)
 $impName = Split-Path -Leaf $dl.Path
+$invSha = 'ABCDEF0123456789' * 4
 
 # Import: SHA256 vollstaendig eingeben, gleiche Bytes hashen und importieren
 Check 'SHA256 normalisieren: Leerzeichen, Kleinschreibung, nur 64 Hexzeichen' ((ConvertTo-SmShaNormal ('  ' + $dl.Sha256.ToLower().Insert(8, ' ') + ' ')) -eq $dl.Sha256 -and (Throws { ConvertTo-SmShaNormal 'abcd' }) -and (Throws { ConvertTo-SmShaNormal ('G' * 64) }) -and (Throws { ConvertTo-SmShaNormal '' }))
@@ -276,57 +294,103 @@ $cp = Join-Path $Work 'cp.bin'
 Check 'Kopieren mit Hash: SHA256 der geschriebenen Bytes gleich Get-FileHash' ((Copy-SmPrintHashed -Source $dl.Path -Dest $cp) -eq (Get-FileHash $cp -Algorithm SHA256).Hash -and (Get-FileHash $cp).Hash -eq (Get-FileHash $dl.Path).Hash)
 $tempHome = Join-Path $Work 'tmp'; New-Item -ItemType Directory -Force $tempHome | Out-Null
 $oldTemp = $env:TEMP; $env:TEMP = $tempHome
-function Count-Tmp { @(Get-ChildItem -LiteralPath $tempHome -Directory -Filter 'ServerMigration-print-*').Count }
+function Count-Tmp { @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Import-*').Count }
+function Count-OldTmp { @(Get-ChildItem -LiteralPath $tempHome -Directory -Filter 'ServerMigration-print-*').Count }
 $fremd = Join-Path $tempHome 'wichtig'; New-Item -ItemType Directory -Force $fremd | Out-Null
-Remove-SmPrintTemp $fremd
+$fremd = Join-Path $made 'wichtig'; New-Item -ItemType Directory -Force $fremd | Out-Null
+Remove-SmPrintWork $fremd
 Check 'Aufraeumen: Verzeichnis mit anderem Namen wird nicht geloescht' (Test-Path $fremd)
-New-Item -ItemType Directory -Force (Join-Path $Work ('ServerMigration-print-' + ('a' * 32))) | Out-Null
-Remove-SmPrintTemp (Join-Path $Work ('ServerMigration-print-' + ('a' * 32)))
-Check 'Aufraeumen: richtiger Name ausserhalb von %TEMP% wird nicht geloescht' (Test-Path (Join-Path $Work ('ServerMigration-print-' + ('a' * 32))))
+Remove-Item -LiteralPath $fremd -Recurse -Force
+New-Item -ItemType Directory -Force (Join-Path $Work ('Import-' + ('a' * 32))) | Out-Null
+Remove-SmPrintWork (Join-Path $Work ('Import-' + ('a' * 32)))
+Check 'Aufraeumen: richtiger Name ausserhalb des Sicherungsordners wird nicht geloescht' (Test-Path (Join-Path $Work ('Import-' + ('a' * 32))))
 $qfile = Join-Path $stubDir 'q-out.txt'
 [IO.File]::WriteAllText($qfile, "Printer: HP-Buero-1`r`nPrinter: Kyocera-Flur`r`nDriver: HP Universal`r`nPort: IP_10.0.0.5`r`n")
 $env:SM_STUB_Q = $qfile
 $invOk = [pscustomobject]@{ Printers = @([pscustomobject]@{ Name = 'HP-Buero-1' }, [pscustomobject]@{ Name = 'Kyocera-Flur' }) }
 $script:getCalls = 99
-$wrong = Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha ('0' * 64) -OldInventory $invOk }
+$wrong = Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha ('0' * 64) -OldInventory $invOk -ExpectedInvSha $invSha -InventorySha $invSha }
 Check 'Falsche SHA256: Abbruch, kein Arbeitsverzeichnis bleibt liegen, Fehler im Protokoll' ($wrong -and (Count-Tmp) -eq 0 -and (Get-Content -LiteralPath (Join-Path $made 'Protokoll.log') -Raw) -match 'Import \(Vorbereitung\) fehlgeschlagen: .*SHA256 stimmt nicht')
-Check 'Unvollstaendige SHA256: Abbruch vor dem Kopieren' ((Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256.Substring(0, 40) -OldInventory $invOk }) -and (Count-Tmp) -eq 0)
-$plan = Initialize-SmPrintImport -FileName $impName -ExpectedSha ($dl.Sha256.ToLower().Insert(10, ' ')) -OldInventory $invOk
-Check 'Plan: Arbeitskopie in neuem %TEMP%\ServerMigration-print-<GUID>, dieselben Bytes (SHA256), nicht im Sicherungsordner' ($plan.Ok -and (Count-Tmp) -eq 1 -and $plan.TempRoot -match 'ServerMigration-print-[0-9a-f]{32}$' -and (Get-FileHash $plan.TempFile -Algorithm SHA256).Hash -eq $dl.Sha256 -and $plan.TempFile.StartsWith($tempHome) -and $plan.Sha256 -eq $dl.Sha256)
+Check 'Unvollstaendige SHA256: Abbruch vor dem Kopieren' ((Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256.Substring(0, 40) -OldInventory $invOk -ExpectedInvSha $invSha -InventorySha $invSha }) -and (Count-Tmp) -eq 0)
+$plan = Initialize-SmPrintImport -FileName $impName -ExpectedSha ($dl.Sha256.ToLower().Insert(10, ' ')) -OldInventory $invOk -ExpectedInvSha $invSha -InventorySha $invSha
+Check 'Plan: Arbeitskopie im gehaerteten Ordner (Import-<GUID> unter Print), nie in %TEMP%, dieselben Bytes (SHA256)' ($plan.Ok -and (Count-Tmp) -eq 1 -and (Count-OldTmp) -eq 0 -and $plan.WorkRoot -match 'Import-[0-9a-f]{32}$' -and (Split-Path -Parent $plan.WorkRoot) -eq $made -and (Get-FileHash $plan.WorkFile -Algorithm SHA256).Hash -eq $dl.Sha256 -and $plan.WorkFile.StartsWith($made) -and -not $plan.WorkFile.StartsWith($tempHome) -and $plan.Sha256 -eq $dl.Sha256)
+Check 'Plan: Arbeitsverzeichnis keine Verknuepfung, Zugriffsliste geprueft (nur Administratoren und SYSTEM)' (-not ((Get-Item -LiteralPath $plan.WorkRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -and -not @(Test-SmDnsStateDirAcl -Path $plan.WorkRoot).Count)
 Check 'Plan: Inhalt aus der Exportdatei (PrintBrm -Q) und Abgleich mit der Inventur ohne Abweichung' ($plan.Lines.Count -eq 4 -and $plan.Lines[0] -eq 'Printer: HP-Buero-1' -and $plan.Missing.Count -eq 0 -and $plan.HasInventory -and ((Get-Content -LiteralPath $env:SM_STUB_LOG -Raw) -match '^-Q -F '))
 $ct = Format-SmPrintImportConfirm -Plan $plan -Shares $true -Publish $false -Force $true
-Check 'Bestaetigungstext zeigt den Inhalt der Exportdatei, die Optionen und die Pruefsumme-Kurzform' ($ct -match 'Printer: Kyocera-Flur' -and $ct -match 'Driver: HP Universal' -and $ct -match 'JA \(Namensgleiche' -and $ct -match 'Inventur und Export stimmen' -and $ct.Contains($plan.Sha256.Substring(0, 12)))
+Check 'Bestaetigungstext zeigt den Inhalt der Exportdatei, die Optionen und die Pruefsumme-Kurzform' ($ct -match 'Printer: Kyocera-Flur' -and $ct -match 'Driver: HP Universal' -and $ct -match 'JA \(Namensgleiche' -and $ct -match 'Druckernamen der Inventur' -and $ct -match 'nicht verglichen' -and $ct -notmatch 'stimmen .berein' -and $ct.Contains($plan.Sha256.Substring(0, 12)))
 Check 'Import ohne Bestaetigung: abgelehnt, Arbeitskopie wird aufgeraeumt' ((ThrowsLike { Invoke-SmPrintImport -Plan $plan } 'nicht bestaetigt') -and (Count-Tmp) -eq 0)
-Remove-SmPrintTemp $plan.TempRoot
+Remove-SmPrintWork $plan.WorkRoot
 Check 'Abbruch durch den Benutzer: Arbeitsverzeichnis geloescht' ((Count-Tmp) -eq 0)
 $invBad = [pscustomobject]@{ Printers = @([pscustomobject]@{ Name = 'HP-Buero-1' }, [pscustomobject]@{ Name = 'Epson-Lager' }) }
-$planBad = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invBad
+$planBad = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invBad -ExpectedInvSha $invSha -InventorySha $invSha
 Check 'Inventur und Export weichen ab (Epson-Lager fehlt im Export): Plan nicht ok, kein Import moeglich' (-not $planBad.Ok -and $planBad.Missing -contains 'Epson-Lager' -and ($planBad.Problems -join ' ') -match 'weichen ab' -and (ThrowsLike { Invoke-SmPrintImport -Plan $planBad -Confirmed } 'nicht vorbereitet'))
-Remove-SmPrintTemp $planBad.TempRoot
+Remove-SmPrintWork $planBad.WorkRoot
 $env:SM_STUB_EXIT = '1'
-$planQ = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk
+$planQ = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -ExpectedInvSha $invSha -InventorySha $invSha
 Check 'Inhalt der Exportdatei nicht lesbar (PrintBrm -Q scheitert): nicht ok' (-not $planQ.Ok -and ($planQ.Problems -join ' ') -match 'nicht lesbar')
-Remove-SmPrintTemp $planQ.TempRoot
+Remove-SmPrintWork $planQ.WorkRoot
 $env:SM_STUB_EXIT = '0'
 $planNoInv = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256
 Check 'Ohne Inventur: Inhalt wird gezeigt, Hinweis "keine Inventur zum Abgleich"' ($planNoInv.Ok -and -not $planNoInv.HasInventory -and (Format-SmPrintImportConfirm -Plan $planNoInv -Shares $true -Publish $false -Force $false) -match 'Keine Inventur')
-Remove-SmPrintTemp $planNoInv.TempRoot
+Remove-SmPrintWork $planNoInv.WorkRoot
 
-function New-Plan { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk }
+function New-Plan { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -ExpectedInvSha $invSha -InventorySha $invSha }
+Check 'Inventur-SHA256 falsch, unvollstaendig oder leer: Abbruch vor dem Kopieren, nichts liegt herum' ((ThrowsLike { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -ExpectedInvSha ('0' * 64) -InventorySha $invSha } 'Inventur stimmt nicht') -and (Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -ExpectedInvSha $invSha.Substring(0, 40) -InventorySha $invSha }) -and (Throws { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -InventorySha $invSha }) -and (Count-Tmp) -eq 0)
+Check 'Inventur-SHA256 mit Gross-/Kleinschreibung und Leerzeichen eingefuegt: wird akzeptiert' ((& { $pi = Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 -OldInventory $invOk -ExpectedInvSha ($invSha.ToLower().Insert(5, ' ')) -InventorySha $invSha; $o = $pi.Ok; Remove-SmPrintWork $pi.WorkRoot; $o }))
+$script:SmDnsStateSidsOverride = @('S-1-5-18')
+Check 'Exportdatei gehoert keinem Administrator (aelter, von einem Nicht-Administrator): wird nicht verwendet' ((ThrowsLike { Initialize-SmPrintImport -FileName $impName -ExpectedSha $dl.Sha256 } 'Administrator') -and (Count-Tmp) -eq 0)
+$script:SmDnsStateSidsOverride = @($me, 'S-1-5-18')
 $p1 = New-Plan
 Remove-Item -LiteralPath $env:SM_STUB_LOG -Force -ErrorAction SilentlyContinue
 $imp1 = Invoke-SmPrintImport -Plan $p1 -Confirmed
 $a1 = (Get-Content -LiteralPath $env:SM_STUB_LOG -Raw).Trim()
-Check 'Import einfach: PrintBrm -R -F <Arbeitskopie in TEMP>, ohne FORCE und ohne -P' ($a1 -match '^-R -F "?[^"]+\.printerExport"?$' -and $a1.Contains($p1.TempRoot) -and $a1 -notmatch 'FORCE|-P ' -and -not $a1.Contains($made))
-Check 'Import: Arbeitsverzeichnis danach geloescht' ((Count-Tmp) -eq 0 -and -not (Test-Path $p1.TempFile))
+Check 'Import einfach: PrintBrm -R -F <Arbeitskopie in TEMP>, ohne FORCE und ohne -P' ($a1 -match '^-R -F "?[^"]+\.printerExport"?$' -and $a1.Contains($p1.WorkRoot) -and $a1 -notmatch 'FORCE|-P ' -and -not $a1.Contains($tempHome))
+Check 'Import: Arbeitsverzeichnis danach geloescht' ((Count-Tmp) -eq 0 -and -not (Test-Path $p1.WorkFile))
 $p2 = New-Plan
 [void](Invoke-SmPrintImport -Plan $p2 -Confirmed -Force -Publish)
 $a2 = (Get-Content -LiteralPath $env:SM_STUB_LOG -Raw).Trim()
 Check 'Import mit Optionen: -O FORCE und -P ORIG (Veroeffentlichung wie vorher)' ($a2 -match '-R -F ' -and $a2 -match '-O FORCE' -and $a2 -match '-P ORIG')
 $aud = Get-Content -LiteralPath (Join-Path $made 'Protokoll.log') -Raw
-Check 'Protokoll: Pruefsumme bestaetigt, Import gestartet mit SHA256 und Optionen, fertig' ($aud -match 'Pruefsumme bestaetigt, Arbeitskopie erstellt' -and $aud -match 'Import gestartet: PrintBrm -R -F Print-Export.*SHA256 [0-9A-F]{64}.*Freigaben uebernehmen' -and $aud -match 'Import fertig: Exitcode 0')
+Check 'Protokoll: Pruefsumme bestaetigt, Import gestartet mit SHA256 und Optionen, fertig' ($aud -match 'Pruefsumme bestaetigt, Arbeitskopie im gehaerteten Ordner erstellt' -and $aud -match 'Inventur-SHA256 [0-9A-F]{64} bestaetigt' -and $aud -match 'Import gestartet: PrintBrm -R -F Print-Export.*SHA256 [0-9A-F]{64}.*Freigaben uebernehmen' -and $aud -match 'Import fertig: Exitcode 0')
+$pH = New-Plan
+$origNative = (Get-Command Invoke-SmNative -CommandType Function).ScriptBlock
+$script:probe = $null
+function Invoke-SmNative {
+    param($Path, $Arguments, $TimeoutSec)
+    if ($Arguments[0] -eq '-R') {
+        $wf = $Arguments[2]; $p = [ordered]@{}
+        try { $s = [IO.File]::Open($wf, 'Open', 'Write', 'ReadWrite'); $s.Dispose(); $p.Write = $true } catch { $p.Write = $false }
+        try { Remove-Item -LiteralPath $wf -Force -ErrorAction Stop; $p.Delete = $true } catch { $p.Delete = $false }
+        try { [IO.File]::Move($wf, $wf + '.x'); $p.Rename = $true } catch { $p.Rename = $false }
+        try { $s = [IO.File]::Open($wf, 'Open', 'Read', 'ReadWrite'); $s.Dispose(); $p.Read = $true } catch { $p.Read = $false }
+        $script:probe = $p
+        return [pscustomobject]@{ ExitCode = 0; Raw = ''; Error = '' }
+    }
+    & $origNative -Path $Path -Arguments $Arguments -TimeoutSec $TimeoutSec
+}
+[void](Invoke-SmPrintImport -Plan $pH -Confirmed)
+Set-Item -Path function:Invoke-SmNative -Value $origNative
+Check 'Waehrend PrintBrm -R laeuft: Arbeitskopie gegen Schreiben, Loeschen und Umbenennen gesperrt (Handle FileShare.Read), Lesen geht' ($script:probe -and -not $script:probe.Write -and -not $script:probe.Delete -and -not $script:probe.Rename -and $script:probe.Read)
+Check 'Nach dem Import: Handle zu, Arbeitsverzeichnis weg' ((Count-Tmp) -eq 0)
+$pJ = New-Plan
+$bak = $pJ.WorkRoot + '-bak'
+Rename-Item -LiteralPath $pJ.WorkRoot -NewName (Split-Path -Leaf $bak)
+$jOk = $false; try { New-Item -ItemType Junction -Path $pJ.WorkRoot -Target $bak | Out-Null; $jOk = $true } catch { }
+if ($jOk) {
+    Remove-Item -LiteralPath $env:SM_STUB_LOG -Force -ErrorAction SilentlyContinue
+    Check 'Arbeitsverzeichnis durch Verknuepfung ersetzt: Import abgelehnt, PrintBrm nicht gestartet' ((ThrowsLike { Invoke-SmPrintImport -Plan $pJ -Confirmed } 'Verknuepfung') -and -not (Test-Path -LiteralPath $env:SM_STUB_LOG))
+    (Get-Item -LiteralPath $pJ.WorkRoot -Force).Delete()
+}
+Remove-Item -LiteralPath $bak -Recurse -Force
+$pJ2 = New-Plan
+Remove-Item -LiteralPath $pJ2.WorkFile -Force
+Check 'Arbeitskopie fehlt: Import abgelehnt' (ThrowsLike { Invoke-SmPrintImport -Plan $pJ2 -Confirmed } 'fehlt')
+$pO = New-Plan
+$pO.WorkRoot = $tempHome; $pO.WorkFile = Join-Path $tempHome 'x.printerExport'
+Check 'Arbeitskopie ausserhalb des Sicherungsordners (manipulierter Plan): Import abgelehnt' (ThrowsLike { Invoke-SmPrintImport -Plan $pO -Confirmed } 'nicht im Arbeitsverzeichnis')
+Get-ChildItem -LiteralPath $made -Directory -Filter 'Import-*' | Remove-Item -Recurse -Force
 $p3 = New-Plan
-[IO.File]::AppendAllText($p3.TempFile, 'manipuliert')
+[IO.File]::AppendAllText($p3.WorkFile, 'manipuliert')
 Check 'Arbeitskopie nach der Pruefung veraendert: Import abgelehnt, nichts gestartet, aufgeraeumt' ((ThrowsLike { Invoke-SmPrintImport -Plan $p3 -Confirmed } 'veraendert') -and (Count-Tmp) -eq 0)
 $p4 = New-Plan
 $env:SM_STUB_EXIT = '5'
@@ -344,7 +408,7 @@ try {
     Check 'Protokoll nicht beschreibbar: Zeile und WARNUNG stehen in der Anzeige-Liste' ($ll.Count -eq 2 -and $ll[1] -match '^WARNUNG: .*nicht geschrieben')
     $p6 = New-Plan   # Vorbereitung schreibt ebenfalls ins Protokoll: gelingt, aber mit Warnung in Log
     Check 'Vorbereitung bei gesperrtem Protokoll: Warnung im Log des Plans' (($p6.Log -join ' ') -match 'WARNUNG')
-    Remove-SmPrintTemp $p6.TempRoot
+    Remove-SmPrintWork $p6.WorkRoot
     $p7 = New-Plan
     $env:SM_STUB_EXIT = '5'
     Check 'Fehler eines aendernden Schritts bei gesperrtem Protokoll: Meldung nennt die Warnung' (ThrowsLike { Invoke-SmPrintImport -Plan $p7 -Confirmed } 'WARNUNG')
@@ -358,12 +422,12 @@ $script:getCalls = 0
 # Freigaben nicht uebernehmen: neu angelegte Drucker werden aus der Freigabe genommen, Bestehende bleiben
 $env:TEMP = $tempHome
 $script:printers = @((New-Pr 'Bestand-1'))
-function Get-Printer { [CmdletBinding()] param() $script:getCalls++; if ($script:getCalls -le 1) { @((New-Pr 'Bestand-1')) } else { @((New-Pr 'Bestand-1'), (New-Pr 'Neu-A'), (New-Pr 'Neu-B' $false)) } }
+function Get-Printer { [CmdletBinding()] param() $script:getCalls++; if ($script:getCalls -le 1) { @((New-Pr 'Bestand-1'), (New-Pr 'HP-Buero-1')) } else { @((New-Pr 'Bestand-1'), (New-Pr 'HP-Buero-1'), (New-Pr 'Neu-A'), (New-Pr 'Neu-B' $false)) } }
 $script:getCalls = 0; $script:unshared = @()
 $pS = New-Plan
 $script:getCalls = 0
 $r2 = Invoke-SmPrintImport -Plan $pS -Confirmed -KeepShares $false
-Check 'Freigaben nicht uebernehmen: nur neu angelegte freigegebene Drucker werden auf nicht freigegeben gesetzt' ((@($script:unshared) -join ',') -eq 'Neu-A' -and ($r2.Log -join ' ') -match 'Freigaben entfernt.*1 Drucker')
+Check 'Freigaben nicht uebernehmen: nur durch diesen Import NEU angelegte Drucker (Vorher-Nachher), nie bestehende (HP-Buero-1 steht schon vorher da, auch in der Inventur)' ((@($script:unshared) -join ',') -eq 'Neu-A' -and ($r2.Log -join ' ') -match 'Freigaben entfernt.*1 neu angelegte Drucker, bestehende unveraendert')
 $script:getCalls = 0; $script:unshared = @()
 $pT = New-Plan
 [void](Invoke-SmPrintImport -Plan $pT -Confirmed)
@@ -484,16 +548,24 @@ function Get-WinEvent { [CmdletBinding()] param($FilterHashtable, $MaxEvents) $s
 function Get-SmbSession { [CmdletBinding()] param() @([pscustomobject]@{ ClientComputerName = '10.0.0.21'; ClientUserName = 'CONTOSO\anna'; NumOpens = 4 }) }
 function Get-SmbOpenFile { [CmdletBinding()] param() @([pscustomobject]@{ ClientComputerName = '10.0.0.21'; ClientUserName = 'CONTOSO\anna'; Path = 'C:\Windows\system32\spool\drivers\x64\3\hp.dll' }) }
 function Get-NetTCPConnection { [CmdletBinding()] param($OwningProcess, $State) @() }
-$ps1 = Invoke-SmPrintCollect -Days 30 -Pseudonymize -Salt 'contoso-projekt-2026'
+$ck = New-SmPseudonymKey
+$ps1 = Invoke-SmPrintCollect -Days 30 -Pseudonymize -Key $ck
 $rawP = Get-Content -LiteralPath $ps1.Path -Raw
 $jP = $rawP | ConvertFrom-Json
-Check 'Pseudonymisiert: Benutzer als Benutzer-<8 Hex>, kein Klarname in Ereignissen und Sofortbild, Salt nicht in der Datei' (@($jP.Events | Where-Object { $_.User -notmatch '^Benutzer-[0-9A-F]{8}$' }).Count -eq 0 -and $rawP -cnotmatch 'anna|bernd' -and $rawP -notmatch 'contoso-projekt-2026' -and $jP.Snapshot.SmbSessions[0].User -match '^Benutzer-[0-9A-F]{8}$' -and $jP.Snapshot.OpenFiles[0].User -match '^Benutzer-' -and $jP.Pseudonymized -eq $true)
+Check 'Pseudonymisiert: Benutzer als Benutzer-<12 Hex>, kein Klarname in Ereignissen und Sofortbild, Schluessel nicht in der Datei' (@($jP.Events | Where-Object { $_.User -notmatch '^Benutzer-[0-9A-F]{12}$' }).Count -eq 0 -and $rawP -cnotmatch 'anna|bernd' -and $rawP -notmatch $ck -and $jP.Snapshot.SmbSessions[0].User -match '^Benutzer-[0-9A-F]{12}$' -and $jP.Snapshot.OpenFiles[0].User -match '^Benutzer-' -and $jP.Pseudonymized -eq $true)
 Check 'Pseudonymisiert: PrintOpen bleibt richtig (vor dem Ersetzen berechnet)' ($jP.Snapshot.SmbSessions[0].PrintOpen -eq $true)
-$ps2 = Invoke-SmPrintCollect -Days 30 -Pseudonymize -Salt 'contoso-projekt-2026'
-Check 'Pseudonyme sind mit demselben Salt stabil und mit anderem Salt verschieden' ((@((Get-Content -LiteralPath $ps2.Path -Raw | ConvertFrom-Json).Events.User) -join ',') -eq (@($jP.Events.User) -join ',') -and (@((Invoke-SmPrintCollect -Days 30 -Pseudonymize -Salt 'ein-anderer-salt-1' | ForEach-Object { Get-Content -LiteralPath $_.Path -Raw | ConvertFrom-Json }).Events.User) -join ',') -ne (@($jP.Events.User) -join ','))
+$ps2 = Invoke-SmPrintCollect -Days 30 -Pseudonymize -Key $ck
+Check 'Pseudonyme sind mit demselben Schluessel stabil und mit anderem Schluessel verschieden' ((@((Get-Content -LiteralPath $ps2.Path -Raw | ConvertFrom-Json).Events.User) -join ',') -eq (@($jP.Events.User) -join ',') -and (@((Invoke-SmPrintCollect -Days 30 -Pseudonymize -Key (New-SmPseudonymKey) | ForEach-Object { Get-Content -LiteralPath $_.Path -Raw | ConvertFrom-Json }).Events.User) -join ',') -ne (@($jP.Events.User) -join ','))
 Check 'Pseudonymisiert: Berater-Tool liest die Datei und meldet Pseudonymisierung' ((Read-SmPrintAccess -Path $ps1.Path).Pseudonymized -eq $true -and (Read-SmPrintAccess -Path $ps1.Path).Events[0].User -match '^Benutzer-')
-Check 'Pseudonyme: zu kurzer Salt abgelehnt' ((Throws { Invoke-SmPrintCollect -Days 30 -Pseudonymize -Salt 'kurz' }) -and (Throws { Invoke-SmPrintCollect -Days 30 -Pseudonymize }))
-Check 'Ohne Pseudonymisierung steht der Name im Klartext, Protokollzeile nennt es' (((Invoke-SmPrintCollect -Days 30).Log -join ' ') -match 'im Klartext' -and ($ps1.Log -join ' ') -match 'pseudonymisiert' -and ($ps1.Log -join ' ') -notmatch 'anna|contoso-projekt')
+Check 'Pseudonyme: kein oder kein zufaelliger 64-Hex-Schluessel (getippt, zu kurz) abgelehnt' ((Throws { Invoke-SmPrintCollect -Days 30 -Pseudonymize -Key 'kurz' }) -and (Throws { Invoke-SmPrintCollect -Days 30 -Pseudonymize -Key 'contoso-projekt-2026-contoso-projekt-2026-contoso-projekt-2026!' }) -and (Throws { Invoke-SmPrintCollect -Days 30 -Pseudonymize }) -and (Throws { Invoke-SmPrintCollect -Days 30 -PseudonymizeClients -Key $ck }))
+$psC = Invoke-SmPrintCollect -Days 30 -Pseudonymize -PseudonymizeClients -Key $ck
+$rawC = Get-Content -LiteralPath $psC.Path -Raw
+$jC = $rawC | ConvertFrom-Json
+Check 'Rechnernamen pseudonymisiert: Rechner-<12 Hex> in Ereignissen und Sofortbild, kein Rechnername, keine Adresse, Kennzeichen in der Datei' (@($jC.Events | Where-Object { $_.Client -notmatch '^Rechner-[0-9A-F]{12}$' }).Count -eq 0 -and $rawC -cnotmatch 'PC-ANNA|PC-BERND|10\.0\.0\.2' -and $jC.Snapshot.SmbSessions[0].Client -match '^Rechner-[0-9A-F]{12}$' -and $jC.Snapshot.OpenFiles[0].Client -match '^Rechner-' -and $jC.ClientsPseudonymized -eq $true -and $rawC -notmatch $ck)
+Check 'Ohne Rechner-Option bleiben Rechnernamen im Klartext (Kennzeichen false)' (($rawP | ConvertFrom-Json).Events[0].Client -match 'PC-' -and ($rawP | ConvertFrom-Json).ClientsPseudonymized -eq $false)
+Check 'Schluessel steht nirgends im Sicherungsordner (Dateien, Protokoll)' (-not (Get-ChildItem -LiteralPath $made -File -Recurse | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue) -match $ck }))
+Check 'Berater-Tool liest Rechner-Kennzeichen' ((Read-SmPrintAccess -Path $psC.Path).ClientsPseudonymized -eq $true)
+Check 'Ohne Pseudonymisierung steht der Name im Klartext, Protokollzeile nennt es' (((Invoke-SmPrintCollect -Days 30).Log -join ' ') -match 'im Klartext' -and ($ps1.Log -join ' ') -match 'pseudonymisiert' -and ($ps1.Log -join ' ') -notmatch ('anna|' + $ck))
 
 # Hochladen in den Tauschordner
 $script:sent = $null

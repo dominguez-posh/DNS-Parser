@@ -25,8 +25,8 @@
                 </StackPanel>
                 <TextBlock Text="SHA256 des Exports (am neuen Server vollständig einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,12,0,2"/>
                 <StackPanel Orientation="Horizontal">
-                    <TextBox x:Name="TxtPrExpSha" Style="{DynamicResource SelectableText}" Width="560" FontFamily="{DynamicResource MonoFont}" FontSize="12" Margin="0,0,8,0" AutomationProperties.Name="SHA256 des Exports"/>
-                    <Button x:Name="BtnPrShaCopy" Content="SHA256 kopieren"/>
+                    <TextBox x:Name="TxtPrExpSha" Style="{DynamicResource SelectableText}" Width="560" Height="44" AcceptsReturn="True" FontFamily="{DynamicResource MonoFont}" FontSize="12" Margin="0,0,8,0" AutomationProperties.Name="SHA256 des Exports"/>
+                    <Button x:Name="BtnPrShaCopy" Content="Beide SHA256 kopieren"/>
                 </StackPanel>
             </StackPanel>
         </Border>
@@ -43,8 +43,10 @@
                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                     <Button x:Name="BtnPrDownload" Content="Herunterladen" Margin="0,0,12,0"/>
                 </StackPanel>
-                <TextBlock Text="SHA256 vom alten Server (vollständig einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
-                <TextBox x:Name="TxtPrShaIn" Padding="8,6" FontFamily="{DynamicResource MonoFont}" FontSize="12" AutomationProperties.Name="SHA256 vom alten Server"/>
+                <TextBlock Text="SHA256 des Exports vom alten Server (vollständig einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtPrShaIn" Padding="8,6" FontFamily="{DynamicResource MonoFont}" FontSize="12" AutomationProperties.Name="SHA256 des Exports vom alten Server"/>
+                <TextBlock Text="SHA256 der Inventur vom alten Server (nur bei gewählter Inventur)" Style="{DynamicResource SmallLabel}" Margin="0,8,0,2"/>
+                <TextBox x:Name="TxtPrInvShaIn" Padding="8,6" FontFamily="{DynamicResource MonoFont}" FontSize="12" AutomationProperties.Name="SHA256 der Inventur vom alten Server"/>
                 <TextBlock x:Name="TxtPrSha" Foreground="{DynamicResource MutedText}" Margin="0,4,0,0" Text="Noch nichts heruntergeladen."/>
                 <CheckBox x:Name="ChkPrShares" Content="Freigaben übernehmen" IsChecked="True" Margin="0,10,0,0"/>
                 <CheckBox x:Name="ChkPrPublish" Content="Im Active Directory veröffentlichen (wie auf dem alten Server)" Margin="0,6,0,0"/>
@@ -75,12 +77,15 @@
                     <Button x:Name="BtnPrCollect" Content="Zugriffe sammeln" Style="{DynamicResource PrimaryButton}"/>
                 </StackPanel>
                 <TextBlock Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Margin="0,10,0,0" Text="Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten."/>
-                <CheckBox x:Name="ChkPrPseudo" Content="Benutzernamen pseudonymisieren (Hash mit Projekt-Salt)" Margin="0,8,0,0"/>
+                <CheckBox x:Name="ChkPrPseudo" Content="Benutzernamen pseudonymisieren (HMAC-SHA256 mit zufälligem Schlüssel)" Margin="0,8,0,0"/>
+                <CheckBox x:Name="ChkPrPseudoClient" Content="Rechnernamen auch pseudonymisieren" Margin="0,6,0,0"/>
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                    <TextBlock Text="Projekt-Salt" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <TextBox x:Name="TxtPrSalt" Width="260" Padding="6,4" AutomationProperties.Name="Projekt-Salt, mindestens 8 Zeichen"/>
-                    <TextBlock Text="mind. 8 Zeichen, für das Projekt immer derselbe, steht nicht in der Datei" Style="{DynamicResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="Schlüssel" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBox x:Name="TxtPrKey" Width="520" Padding="6,4" FontFamily="{DynamicResource MonoFont}" FontSize="12" Margin="0,0,8,0" AutomationProperties.Name="Schlüssel für Pseudonyme, 64 Hexzeichen"/>
+                    <Button x:Name="BtnPrKeyNew" Content="Neuer Schlüssel" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPrKeyCopy" Content="Schlüssel kopieren"/>
                 </StackPanel>
+                <TextBlock Text="Zufällig erzeugt, steht nie in einer Datei oder im Tauschordner. Für alle Sammlungen und Server des Projekts denselben verwenden und sicher aufbewahren." Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,4,0,0"/>
             </StackPanel>
         </Border>
 

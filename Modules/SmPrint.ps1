@@ -268,7 +268,7 @@ function ConvertFrom-SmPrintEventXml {
 
 function New-SmPrintAccessFile {
     <# Objekt fuer die Zugriffsdatei (wird als JSON geschrieben). #>
-    param([string]$Computer, [object[]]$Events = @(), $Snapshot, [datetime]$RequestedFrom, [bool]$Truncated = $false, [switch]$Pseudonymized)
+    param([string]$Computer, [object[]]$Events = @(), $Snapshot, [datetime]$RequestedFrom, [bool]$Truncated = $false, [switch]$Pseudonymized, [switch]$ClientsPseudonymized)
     $ev = @($Events | Sort-Object Time)
     [ordered]@{
         Schema = $script:SmPrintSchema; Kind = 'PrintAccess'; Computer = (Format-SmPrintText $Computer 64)
@@ -276,7 +276,7 @@ function New-SmPrintAccessFile {
         RequestedFrom = $RequestedFrom.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         From = $(if ($ev.Count) { $ev[0].Time.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { $null })
         To = $(if ($ev.Count) { $ev[-1].Time.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { $null })
-        Count = $ev.Count; Truncated = $Truncated; Pseudonymized = [bool]$Pseudonymized
+        Count = $ev.Count; Truncated = $Truncated; Pseudonymized = [bool]$Pseudonymized; ClientsPseudonymized = [bool]$ClientsPseudonymized
         Events = @($ev | ForEach-Object { [ordered]@{ Time = $_.Time.ToString('yyyy-MM-ddTHH:mm:ssZ'); User = $_.User; Client = $_.Client; Printer = $_.Printer; Port = $_.Port; Pages = $_.Pages; Bytes = $_.Bytes; RecordId = $_.RecordId } })
         Snapshot = $Snapshot
     }
@@ -303,7 +303,7 @@ function Read-SmPrintAccess {
         $files = @(Get-SmPrintList $snap 'OpenFiles' | Select-Object -First 5000 | ForEach-Object { [pscustomobject]@{ Client = (Format-SmPrintName $_['Client']); User = (Format-SmPrintText $_['User']); Path = (Format-SmPrintText $_['Path'] 260) } })
     }
     [pscustomobject]@{
-        Computer = Format-SmPrintText (Get-SmPrintVal $d 'Computer') 64; Events = $events; Truncated = (Get-SmPrintBool (Get-SmPrintVal $d 'Truncated')); Pseudonymized = (Get-SmPrintBool (Get-SmPrintVal $d 'Pseudonymized'))
+        Computer = Format-SmPrintText (Get-SmPrintVal $d 'Computer') 64; Events = $events; Truncated = (Get-SmPrintBool (Get-SmPrintVal $d 'Truncated')); Pseudonymized = (Get-SmPrintBool (Get-SmPrintVal $d 'Pseudonymized')); ClientsPseudonymized = (Get-SmPrintBool (Get-SmPrintVal $d 'ClientsPseudonymized'))
         Sessions = $sessions; OpenFiles = $files; Taken = (ConvertTo-SmPrintTime (Get-SmPrintVal $d 'Created'))
     }
 }
@@ -322,13 +322,21 @@ function Merge-SmPrintEvents {
 
 # ---------------------------------------------------------------- Auswertung
 
+function New-SmPseudonymKey {
+    <# Zufaelliger Schluessel fuer Pseudonyme: 32 Byte aus dem kryptografischen Zufallsgenerator, als 64 Hexzeichen. Er wird angezeigt und kopiert, nie in eine Datei oder den Tauschordner geschrieben. #>
+    $b = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+    -join ($b | ForEach-Object { $_.ToString('X2') })
+}
+
 function Get-SmPseudonym {
-    <# Kuerzel fuer einen Namen (personenbezogene Daten): Praefix und 6 Hexzeichen aus SHA256 mit Salt. Gleicher Name, gleiches Kuerzel im selben Lauf. #>
-    param([string]$Value, [Parameter(Mandatory)][string]$Salt, [string]$Prefix = 'Benutzer', [ValidateRange(4, 16)][int]$HexLength = 6)
+    <# Kuerzel fuer einen Namen (personenbezogene Daten): Praefix und 12 Hexzeichen aus HMAC-SHA256 mit geheimem Schluessel (Name klein geschrieben). Gleicher Name und Schluessel, gleiches Kuerzel; ohne Schluessel nicht zurueckrechenbar. #>
+    param([string]$Value, [Parameter(Mandatory)][Alias('Salt')][string]$Key, [string]$Prefix = 'Benutzer', [ValidateRange(4, 32)][int]$HexLength = 12)
     if (-not $Value) { return '' }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Salt + '|' + $Value.ToLowerInvariant())) } finally { $sha.Dispose() }
-    '{0}-{1}' -f $Prefix, ((-join ($h[0..7] | ForEach-Object { $_.ToString('X2') })).Substring(0, $HexLength))
+    $mac = New-Object Security.Cryptography.HMACSHA256 (, [Text.Encoding]::UTF8.GetBytes($Key))
+    try { $h = $mac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value.Trim().ToLowerInvariant())) } finally { $mac.Dispose() }
+    '{0}-{1}' -f $Prefix, ((-join ($h | ForEach-Object { $_.ToString('X2') })).Substring(0, $HexLength))
 }
 
 function Get-SmPrintUsage {
@@ -461,7 +469,7 @@ function Get-SmPrintPageUiNames {
 function Initialize-SmPrintPage {
     <# Verdrahtet die Seite Print des Berater-Tools (UI\Print.xaml). GetShare liefert den Tauschordner oder $null. #>
     param([Parameter(Mandatory)]$Ui, [Parameter(Mandatory)][string[]]$JobModules, [Parameter(Mandatory)][scriptblock]$AddLog, [Parameter(Mandatory)][scriptblock]$GetShare)
-    $script:SmPB = @{ Ui = $Ui; Modules = $JobModules; Log = $AddLog; GetShare = $GetShare; Old = $null; New = $null; Events = @(); EventFiles = @(); Snapshot = $null; LastCompare = $null; Salt = [guid]::NewGuid().ToString('N'); Busy = $false }
+    $script:SmPB = @{ Ui = $Ui; Modules = $JobModules; Log = $AddLog; GetShare = $GetShare; Old = $null; New = $null; Events = @(); EventFiles = @(); Snapshot = $null; LastCompare = $null; Salt = (New-SmPseudonymKey); Busy = $false }
     foreach ($v in 'Je Benutzer', 'Je Rechner', 'Je Drucker', 'Ungenutzte Drucker', 'Sofortbild (SMB-Sitzungen)') { [void]$Ui.CmbPbView.Items.Add($v) }
     $Ui.CmbPbView.SelectedIndex = 0
     $Ui.BtnPbRefresh.Add_Click({ Update-SmPbShareList })
@@ -532,7 +540,7 @@ function Start-SmPbLoad {
                 $dir = Join-Path $env:TEMP ('ServerMigration-Print-' + [guid]::NewGuid().ToString('N'))
                 [void](New-Item -ItemType Directory $dir)
                 $temp = $dir; $file = Join-Path $dir $P.Name
-                Receive-SmShareFile -Share $P.Share -Name $P.Name -OutFile $file
+                Receive-SmShareFile -Share $P.Share -Name $P.Name -OutFile $file -MaxBytes $script:SmPrintMaxJsonBytes
             }
             try {
                 if ($P.Kind -eq 'Events') { [pscustomobject]@{ Kind = 'Events'; Data = (Read-SmPrintAccess -Path $file); Name = (Split-Path -Leaf $file) } }
@@ -550,7 +558,7 @@ function Start-SmPbLoad {
                 'Events' {
                     $s.EventFiles = @($s.EventFiles) + $r.Name
                     $s.Events = Merge-SmPrintEvents -Events (@($s.Events) + @($r.Data.Events))
-                    if ($r.Data.Pseudonymized) { & $s.Log 'Hinweis: Die Benutzernamen in dieser Zugriffsdatei sind pseudonymisiert.' }
+                    if ($r.Data.Pseudonymized) { & $s.Log ('Hinweis: Die Benutzernamen in dieser Zugriffsdatei sind pseudonymisiert' + $(if ($r.Data.ClientsPseudonymized) { ', die Rechnernamen auch.' } else { '.' })) }
                     if ($r.Data.Truncated) { & $s.Log 'Hinweis: Diese Zugriffsdatei wurde beim Sammeln gekuerzt (nur die neuesten Ereignisse).' }
                     $s.Snapshot = $r.Data
                 }
