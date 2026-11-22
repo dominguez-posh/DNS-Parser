@@ -225,6 +225,12 @@ try {
     $backBig = Join-Path $work 'gross_zurueck.bin'
     Receive-SmShareFile -Share $share -Name 'gross_1.bin' -OutFile $backBig
     Check 'Herunterladen gross: vollstaendig und gleich zusammengesetzt (SHA256)' ((Get-FileHash $backBig).Hash -eq (Get-FileHash $big).Hash)
+    $tooBig = Join-Path $work 'zu_gross_zurueck.bin'
+    $limitMsg = ''; try { Receive-SmShareFile -Share $share -Name 'gross_1.bin' -OutFile $tooBig -MaxBytes 100KB } catch { $limitMsg = $_.Exception.Message }
+    Check 'Herunterladen: bricht ab, sobald der Download MaxBytes ueberschreitet, und loescht die halbe Datei' ($limitMsg -match 'Limit' -and -not (Test-Path -LiteralPath $tooBig))
+    $exactLimit = Join-Path $work 'genau_zurueck.bin'
+    Receive-SmShareFile -Share $share -Name 'gross_1.bin' -OutFile $exactLimit -MaxBytes $rnd.Length
+    Check 'Herunterladen: genau am Limit geht durch' ((Get-FileHash $exactLimit).Hash -eq (Get-FileHash $big).Hash)
 
     # genaues Vielfaches und erneutes Hochladen ersetzt die Datei
     $exact = Join-Path $work 'gross_1.bin'

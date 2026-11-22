@@ -25,10 +25,11 @@ $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmTausch.ps1')
 . (Join-Path $root 'Modules\SmPaket.ps1')
 . (Join-Path $root 'Modules\SmProjekte.ps1')
+. (Join-Path $root 'Modules\SmExport.ps1')
 . (Join-Path $root 'Modules\SmDns.ps1')
 . (Join-Path $root 'Modules\SmDnsUi.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'), (Join-Path $root 'Modules\SmProjekte.ps1'))
-$dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDns.ps1'))
+$dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmExport.ps1'), (Join-Path $root 'Modules\SmDns.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">

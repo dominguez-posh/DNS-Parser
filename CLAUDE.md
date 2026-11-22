@@ -8,3 +8,4 @@ Werkzeug für die Migration von DNS, DHCP, Printserver und AD.
 - Keine Kundendaten, Links, Kennwörter oder internen Adressen ins Repo. Tests nur mit Beispieldaten (contoso.local).
 - Akzeptiertes Risiko: Tauschordner-Link in History/Logs des Kundenservers.
 - Sicherheit: `docs/security-checklist.md` vor jeder Änderung am Einzeiler, Paket oder Tauschordner prüfen.
+- Niemals XML aus dem Tauschordner mit `Import-Clixml` öffnen (Clixml baut Objekte aus fremden Daten). Daten aus dem Tauschordner nur als Text, JSON oder CSV lesen und selbst prüfen.

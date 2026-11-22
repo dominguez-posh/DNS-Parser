@@ -8,9 +8,13 @@
     Mit Windows PowerShell 5.1: powershell.exe -NoProfile -STA -File tests\Test-Dns.ps1 [-LargeMB 500]
 .PARAMETER LargeMB
     Groesse des erzeugten Logs fuer die Geschwindigkeitsmessung in MB (Standard 40; 500 fuer die volle Messung).
+.PARAMETER CompareOld
+    Laesst zusaetzlich den alten Parser (git show 3326a3c:DNSParser.ps1) und den neuen auf derselben Datei laufen und gibt die Zeiten aus (#8).
+.PARAMETER CompareMB
+    Groesse der Vergleichsdatei in MB (Standard 1, damit die Suite schnell bleibt; der alte Parser braucht fuer 500 MB Stunden).
 #>
 [CmdletBinding()]
-param([int]$LargeMB = 40)
+param([int]$LargeMB = 40, [switch]$CompareOld, [int]$CompareMB = 1)
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -eq 5) { $env:PSModulePath = (($env:PSModulePath -split ';') | Where-Object { $_ -notmatch '(?i)[\\/]PowerShell[\\/](7|Modules)' }) -join ';'; Import-Module Microsoft.PowerShell.Utility -Force }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -21,6 +25,7 @@ function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "OK   $Name" -F
 function Throws([scriptblock]$Block) { try { & $Block | Out-Null; $false } catch { $true } }
 
 . (Join-Path $repo 'Modules\SmTausch.ps1')
+. (Join-Path $repo 'Modules\SmExport.ps1')
 . (Join-Path $repo 'Modules\SmDns.ps1')
 . (Join-Path $repo 'server\SmDnsServer.ps1')
 Initialize-SmDnsEngine
@@ -39,7 +44,7 @@ function Raw($Log) { @($Log.Query('Roh', '')) }
 $T = { param([int]$y, [int]$mo, [int]$d, [int]$h, [int]$mi, [int]$s) (New-Object DateTime $y, $mo, $d, $h, $mi, $s).Ticks }
 
 # ---------------------------------------------------------------- 1. Dateien: Syntax, Kodierung
-foreach ($f in 'Modules\SmDns.ps1', 'Modules\SmDnsUi.ps1', 'server\SmDnsServer.ps1', 'tests\Test-Dns.ps1', 'DNSParser.ps1') {
+foreach ($f in 'Modules\SmDns.ps1', 'Modules\SmDnsUi.ps1', 'Modules\SmExport.ps1', 'server\SmDnsServer.ps1', 'tests\Test-Dns.ps1', 'DNSParser.ps1') {
     $p = Join-Path $repo $f
     $errs = $null; $tok = $null
     [void][Management.Automation.Language.Parser]::ParseFile($p, [ref]$tok, [ref]$errs)
@@ -47,6 +52,7 @@ foreach ($f in 'Modules\SmDns.ps1', 'Modules\SmDnsUi.ps1', 'server\SmDnsServer.p
     Check "Syntax und Kodierung (ASCII oder UTF-8 mit BOM): $f" ((-not $errs) -and (($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) -or -not ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1)))
 }
 foreach ($f in 'UI\Dns.xaml', 'UI\DnsServer.xaml') { Check "XAML laesst sich lesen: $f" ($(try { [xml](Get-Content -LiteralPath (Join-Path $repo $f) -Raw -Encoding UTF8) | Out-Null; $true } catch { $false })) }
+Check 'Oberflaeche: Hinweis neben Reverse-Lookup (fragt beim DNS des Berater-Rechners ab)' ((Get-Content -LiteralPath (Join-Path $repo 'UI\Dns.xaml') -Raw -Encoding UTF8).Contains('Fragt die internen IPs beim DNS des Berater-Rechners ab.'))
 
 # ---------------------------------------------------------------- 2. Namen
 Check 'Name: (3)www(7)contoso(5)local(0)' ((ConvertFrom-SmDnsName '(3)www(7)contoso(5)local(0)') -eq 'www.contoso.local')
@@ -182,9 +188,9 @@ $page = $ev.GetPage('Roh', '', 5)
 Check 'Seite: Begrenzung und Gesamtzahl' ($page.Items.Count -eq 5 -and $page.Total -eq 11 -and $page.Cut -and $page.Items.GetType().GetGenericArguments()[0].Name -eq 'SmRawRow')
 Check 'Seite: gefilterte Gesamtzahl' ($ev.GetPage('Roh', 'a3f2', 1).Total -eq 2)
 
-# ---------------------------------------------------------------- 6. CSV (Formel-Injection, Checkliste 7)
-Check 'CSV: = + - @ Tab CR bekommen Anfuehrungszeichen davor' ((@('=1+1', '+SUM(1)', '-2', '@A1', "`tx", "`rx") | ForEach-Object { [SmCsv]::Escape($_, ';') } | Where-Object { $_ -notmatch "^`"?'" }).Count -eq 0)
-Check 'CSV: normaler Text bleibt, Trenner und Anfuehrungszeichen werden gequotet' ([SmCsv]::Escape('abc', ';') -eq 'abc' -and [SmCsv]::Escape('a;b', ';') -eq '"a;b"' -and [SmCsv]::Escape('a"b', ';') -eq '"a""b"' -and [SmCsv]::Escape("a`nb", ';') -eq "`"a`nb`"" -and [SmCsv]::Escape('', ';') -eq '')
+# ---------------------------------------------------------------- 6. Export (Export-SmTable: CSV und Excel, Formel-Injection, Checkliste 7)
+Initialize-SmExportEngine
+Check 'Export: = + - @ Tab CR bekommen ein Anfuehrungszeichen davor' ((@('=1+1', '+SUM(1)', '-2', '@A1', "`tx", "`rx") | ForEach-Object { [SmTable]::Guard($_) } | Where-Object { $_ -notmatch "^'" }).Count -eq 0 -and [SmTable]::Guard('abc') -eq 'abc')
 $injLog = Join-Path $work 'inj.log'
 Write-Log $injLog @(
     (L '22.11.2026' '10:00:00' 'Rcv' '10.0.0.15' 'a3f2' '' 'Q' '0001' 'D' 'NOERROR' 'A' '(4)=cmd(5)local(0)')
@@ -192,16 +198,58 @@ Write-Log $injLog @(
     (L '22.11.2026' '10:00:02' 'Rcv' '10.0.0.15' 'a3f4' '' 'Q' '0001' 'D' 'NOERROR' 'A' '(9)-1+cmd|zz(0)'))
 $ci = New-SmDnsLog; $ci.ParseFile($injLog, $null)
 $csv = Join-Path $work 'out.csv'
-$n = $ci.Export('Roh', '', $csv, [char]';')
+$n = Export-SmTable -Rows ($ci.Query('Roh', '')) -Path $csv
 $text = [IO.File]::ReadAllText($csv, [Text.Encoding]::UTF8)
 $csvBytes = [IO.File]::ReadAllBytes($csv)
-Check 'CSV-Export Rohdaten: 3 Zeilen, UTF-8 mit BOM, Kopfzeile mit Leerzeichen' ($n -eq 3 -and $csvBytes[0] -eq 0xEF -and $text -match 'Zeit;Richtung;Protokoll;Ip;Art;Opcode;Flags;Flags Hex;Rcode;Typ;Name;Xid')
+Check 'CSV-Export Rohdaten: 3 Zeilen, UTF-8 mit BOM, Kopfzeile mit Leerzeichen' ($n -eq 3 -and $csvBytes[0] -eq 0xEF -and $csvBytes[1] -eq 0xBB -and $csvBytes[2] -eq 0xBF -and $text -match 'Zeit;Richtung;Protokoll;Ip;Art;Opcode;Flags;Flags Hex;Rcode;Typ;Name;Xid')
 Check 'CSV-Export: gefaehrliche Namen sind entschaerft, Trenner gequotet' ($text -match ";'=cmd\.local;" -and $text -match ';"a;b\.local";' -and $text -match ";'-1\+cmd\|zz;" -and $text -notmatch ';=cmd' -and $text -notmatch ';-1\+cmd')
-Check 'CSV-Export gefilterte Ansicht enthaelt nur Treffer' ($ci.Export('Roh', 'cmd', $csv, [char]';') -eq 2)
+Check 'CSV-Export gefilterte Ansicht enthaelt nur Treffer' ((Export-SmTable -Rows ($ci.Query('Roh', 'cmd')) -Path $csv) -eq 2)
 $csv2 = Join-Path $work 'out2.csv'
-$m = Export-SmCsv -Items @([pscustomobject]@{ Name = '=evil'; Anzahl = 5 }, [pscustomobject]@{ Name = 'ok'; Anzahl = -3 }) -Path $csv2
+$m = Export-SmTable -Rows @([pscustomobject]@{ Name = '=evil'; Anzahl = 5 }, [pscustomobject]@{ Name = 'ok'; Anzahl = -3 }) -Path $csv2
 $t2 = [IO.File]::ReadAllText($csv2, [Text.Encoding]::UTF8)
-Check 'Export-SmCsv: Text entschaerft, Zahlen unveraendert (auch negative)' ($m -eq 2 -and $t2 -match "'=evil;5" -and $t2 -match 'ok;-3')
+Check 'CSV: Text entschaerft, Zahlen unveraendert (auch negative), CRLF' ($m -eq 2 -and $t2 -match "'=evil;5" -and $t2 -match 'ok;-3' -and $t2 -match "`r`n")
+
+# Excel (xlsx): selbst gebautes OpenXML
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+function Read-ZipText([string]$Zip, [string]$Entry) {
+    $z = [IO.Compression.ZipFile]::OpenRead($Zip)
+    try { $e = $z.GetEntry($Entry); if (-not $e) { return $null }; $r = New-Object IO.StreamReader($e.Open(), [Text.Encoding]::UTF8); try { $r.ReadToEnd() } finally { $r.Dispose() } } finally { $z.Dispose() }
+}
+$xl = Join-Path $work 'out.xlsx'
+$ctrl = [string][char]1
+$xrows = @(
+    [pscustomobject]@{ Name = '=1+1'; Anzahl = 5; ErsteAnfrage = [datetime]'2026-11-22 10:00:00'; Preis = -2.5; Text = 'a<b>&"c"' }
+    [pscustomobject]@{ Name = '@SUM(A1)'; Anzahl = -3; ErsteAnfrage = $null; Preis = 1.25; Text = "x${ctrl}y" }
+    [pscustomobject]@{ Name = 'ok'; Anzahl = 0; ErsteAnfrage = [datetime]'2026-01-02 03:04:05'; Preis = 100; Text = '+49 123' })
+$xn = Export-SmTable -Rows $xrows -Path $xl
+$zipOk = $true; try { $zx = [IO.Compression.ZipFile]::OpenRead($xl); $names = @($zx.Entries | ForEach-Object FullName); $zx.Dispose() } catch { $zipOk = $false; $names = @() }
+Check 'xlsx: laesst sich als ZIP oeffnen, Pflichtteile vorhanden' ($zipOk -and $xn -eq 3 -and ($names -contains '[Content_Types].xml') -and ($names -contains '_rels/.rels') -and ($names -contains 'xl/workbook.xml') -and ($names -contains 'xl/worksheets/sheet1.xml') -and ($names -contains 'xl/styles.xml'))
+$sheetText = Read-ZipText $xl 'xl/worksheets/sheet1.xml'
+$sheet = $null; try { $sheet = [xml]$sheetText } catch { }
+Check 'xlsx: sheet1.xml, workbook.xml und styles.xml sind gueltiges XML' ($sheet -and $(try { [xml](Read-ZipText $xl 'xl/workbook.xml') | Out-Null; [xml](Read-ZipText $xl 'xl/styles.xml') | Out-Null; [xml](Read-ZipText $xl '[Content_Types].xml') | Out-Null; $true } catch { $false }))
+$nsm = New-Object Xml.XmlNamespaceManager($sheet.NameTable); $nsm.AddNamespace('m', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main')
+function Cell([string]$Ref) { $sheet.SelectSingleNode("//m:c[@r='$Ref']", $nsm) }
+function CellText($c) { if ($c.t -eq 'inlineStr') { $c.SelectSingleNode('m:is/m:t', $nsm).InnerText } else { $c.SelectSingleNode('m:v', $nsm).InnerText } }
+Check 'xlsx: Kopfzeile fett (Stil 1), Namen mit Leerzeichen getrennt' ((Cell 'A1').s -eq '1' -and (CellText (Cell 'A1')) -eq 'Name' -and (CellText (Cell 'B1')) -eq 'Anzahl' -and (CellText (Cell 'C1')) -eq 'Erste Anfrage' -and ($sheet.SelectNodes('//m:row[@r="1"]/m:c', $nsm) | Where-Object { $_.s -ne '1' }).Count -eq 0)
+Check 'xlsx: AutoFilter ueber Kopfzeile und alle Daten (A1:E4)' ($sheet.SelectSingleNode('//m:autoFilter', $nsm).ref -eq 'A1:E4')
+Check 'xlsx: Zahlen sind Zahlen (auch negativ und Komma-Werte), Text ist Inline-String' ((Cell 'B2').t -ne 'inlineStr' -and (CellText (Cell 'B2')) -eq '5' -and (CellText (Cell 'B3')) -eq '-3' -and (CellText (Cell 'D2')) -eq '-2.5' -and (CellText (Cell 'D4')) -eq '100' -and (Cell 'A4').t -eq 'inlineStr' -and (CellText (Cell 'A4')) -eq 'ok')
+Check 'xlsx: Datum als Text im ISO-Format, leere Zelle (null) fehlt' ((Cell 'C2').t -eq 'inlineStr' -and (CellText (Cell 'C2')) -eq '2026-11-22 10:00:00' -and (CellText (Cell 'C4')) -eq '2026-01-02 03:04:05' -and $null -eq (Cell 'C3'))
+Check 'xlsx: Formel-Injection: "=1+1" und "@SUM(A1)" sind Text mit Anfuehrungszeichen, kein Formel-Element in der Datei' ((CellText (Cell 'A2')) -eq "'=1+1" -and (Cell 'A2').t -eq 'inlineStr' -and (CellText (Cell 'A3')) -eq "'@SUM(A1)" -and (CellText (Cell 'E4')) -eq "'+49 123" -and $sheet.SelectNodes('//*[local-name()="f"]').Count -eq 0 -and $sheetText -notmatch '<f[ >]')
+Check 'xlsx: Sonderzeichen (<, >, &, Anfuehrungszeichen) bleiben erhalten, Steuerzeichen werden zu ?' ((CellText (Cell 'E2')) -eq 'a<b>&"c"' -and (CellText (Cell 'E3')) -eq 'x?y')
+$xh = Join-Path $work 'hash.xlsx'
+[void](Export-SmTable -Rows @([ordered]@{ Name = 'h1'; Wert = 1 }, [ordered]@{ Name = '=h2'; Wert = 2 }) -Path $xh)
+$sheet = [xml](Read-ZipText $xh 'xl/worksheets/sheet1.xml')
+Check 'xlsx: Hashtables als Zeilen (Schluessel = Spalten), Injection auch hier' ((CellText (Cell 'A2')) -eq 'h1' -and (CellText (Cell 'B3')) -eq '2' -and (CellText (Cell 'A3')) -eq "'=h2")
+$xe = Join-Path $work 'leer.xlsx'
+Check 'xlsx und csv ohne Zeilen: gueltige Datei, 0 Zeilen' ((Export-SmTable -Rows @() -Path $xe) -eq 0 -and $(try { [xml](Read-ZipText $xe 'xl/worksheets/sheet1.xml') | Out-Null; $true } catch { $false }) -and (Export-SmTable -Rows @() -Path (Join-Path $work 'leer.csv')) -eq 0)
+$xd = Join-Path $work 'dns.xlsx'
+$xdn = Export-SmTable -Rows ($ci.Query('Roh', '')) -Path $xd
+$sheet = [xml](Read-ZipText $xd 'xl/worksheets/sheet1.xml')
+Check 'xlsx: DNS-Rohdaten (typisierte Objekte aus dem Parser) mit entschaerften Namen' ($xdn -eq 3 -and (CellText (Cell 'K2')) -eq "'=cmd.local" -and (CellText (Cell 'K4')) -eq "'-1+cmd|zz" -and (CellText (Cell 'A2')) -eq '2026-11-22 10:00:00')
+$bigRows = [Linq.Enumerable]::Repeat([object]([pscustomobject]@{ A = 1; B = 'x' }), 1048577)
+$tooMany = Join-Path $work 'zuviele.xlsx'
+Check 'xlsx: mehr als 1.048.575 Zeilen werden abgelehnt (Hinweis auf CSV), keine halbe Datei bleibt' ((Throws { Export-SmTable -Rows $bigRows -Path $tooMany }) -and -not (Test-Path $tooMany))
+Check 'Export: falsche Endung und fehlender Ordner abgelehnt' ((Throws { Export-SmTable -Rows @() -Path (Join-Path $work 'x.txt') }) -and (Throws { Export-SmTable -Rows @() -Path (Join-Path $work 'gibt\es\nicht.xlsx') }))
 
 # ---------------------------------------------------------------- 7. Metadatei und ZIP (feindliche Daten)
 $goodMeta = @{
@@ -251,6 +299,48 @@ try {
 finally { foreach ($k in $lim.Keys) { $script:SmDnsLimits[$k] = $lim[$k] } }
 $ms = New-Object SmLimitStream (New-Object IO.MemoryStream (, (New-Object byte[] 5000))), 1000
 Check 'Limit-Strom: bricht ab, wenn mehr entpackt wird als erlaubt (auch bei falscher Groessenangabe im ZIP)' (Throws { $buf = New-Object byte[] 400; while ($ms.Read($buf, 0, 400) -gt 0) { } })
+# Gelesene Bytes werden ueber alle Eintraege gezaehlt (gemeinsames Budget), nicht nur je Eintrag
+$bud = New-Object SmByteBudget -ArgumentList 1000
+$b1 = New-Object SmLimitStream (New-Object IO.MemoryStream (, (New-Object byte[] 800))), 5000, $bud
+$b2 = New-Object SmLimitStream (New-Object IO.MemoryStream (, (New-Object byte[] 800))), 5000, $bud
+$rd1 = New-Object byte[] 800
+$first = $b1.Read($rd1, 0, 800)
+Check 'Byte-Budget: zwei Eintraege, jeder unter seinem Limit, zusammen ueber dem Gesamtlimit: der zweite bricht ab' ($first -eq 800 -and $bud.Used -eq 800 -and (Throws { $x = New-Object byte[] 800; [void]$b2.Read($x, 0, 800) }))
+$lim2 = $script:SmDnsLimits.Clone()
+try {
+    $script:SmDnsLimits.MaxTotalBytes = 600
+    $twoLogs = Join-Path $work 'two.zip'
+    New-TestZip $twoLogs @{ 'a.log' = $logText; 'b.log' = $logText }
+    Check 'ZIP: Gesamtlimit ueber alle Logs wird erzwungen' (Throws { Import-SmDnsZip -Log (New-SmDnsLog) -Path $twoLogs })
+}
+finally { foreach ($k in $lim2.Keys) { $script:SmDnsLimits[$k] = $lim2[$k] } }
+$longName = Join-Path $work 'longname.zip'
+New-TestZip $longName @{ (('a' * 300) + '.log') = $logText; 'dns.log' = $logText }
+$lnl = New-SmDnsLog; $lni = Import-SmDnsZip -Log $lnl -Path $longName
+Check 'ZIP: Eintragsname ueber 255 Zeichen wird uebersprungen, Warnung ohne den langen Namen' ($lnl.RowCount -eq 11 -and ($lni.Warnings -join ' ') -match 'zu langem Namen' -and (($lni.Warnings -join ' ').Length -lt 300))
+$longDomain = '(63)' + ('a' * 63) + '(63)' + ('b' * 63) + '(63)' + ('c' * 63) + '(63)' + ('d' * 63) + '(5)local(0)'
+$lg = Parse-Lines @((L '22.11.2026' '10:00:00' 'Rcv' '10.0.0.15' 'a3f2' '' 'Q' '0001' 'D' 'NOERROR' 'A' $longDomain)) -Name 'longname.log'
+Check 'Namen werden auf 255 Zeichen begrenzt' ($lg.RowCount -eq 1 -and (Raw $lg)[0].Name.Length -eq 255)
+# Namenstabellen haben eine feste Obergrenze, der Rest wird als (weitere) gezaehlt
+$oldMaxN = [SmDnsLog]::MaxNames; $oldMaxI = [SmDnsLog]::MaxIps
+try {
+    [SmDnsLog]::MaxNames = 5; [SmDnsLog]::MaxIps = 3
+    $many = 1..20 | ForEach-Object { (L '22.11.2026' ('10:00:{0:00}' -f $_) 'Rcv' ('10.0.0.' + $_) ('a{0:000}' -f $_) '' 'Q' '0001' 'D' 'NOERROR' 'A' ('(3)n{0:00}(5)local(0)' -f $_)) }
+    $ml = Parse-Lines $many -Name 'many.log'
+    $mr = Raw $ml
+    Check 'Tabellen: Obergrenze fuer Namen und IPs, alle Zeilen bleiben, Rest als (weitere)' ($ml.RowCount -eq 20 -and $ml.Names.Count -le 6 -and $ml.Ips.Count -le 4 -and $ml.Names[0] -eq '(weitere)' -and @($mr | Where-Object { $_.Name -eq '(weitere)' }).Count -eq 16 -and @($mr | Where-Object { $_.Ip -eq '(weitere)' }).Count -eq 18)
+    Check 'Tabellen: Auswertung laeuft mit der Obergrenze weiter (Clients, Namen)' (@($ml.Query('Clients', '')).Count -ge 3 -and @($ml.Query('Namen', '')).Count -ge 4)
+}
+finally { [SmDnsLog]::MaxNames = $oldMaxN; [SmDnsLog]::MaxIps = $oldMaxI }
+# Regex: kein quadratisches Backtracking, Zeitlimit je Zeile
+Check 'Regex: Zeitlimit je Zeile gesetzt' ([SmDnsLog]::MatchTimeout.TotalMilliseconds -gt 0 -and [SmDnsLog]::MatchTimeout.TotalSeconds -le 10)
+$gap = (' ' * 700)
+$evilLines = 1..400 | ForEach-Object { (L '22.11.2026' '10:00:00' 'Rcv' '10.0.0.15' 'a3f2' '' 'Q' '0001' 'D' 'NOERROR' 'A' ("a${gap}b${gap}c${gap}d")) + (' ' * 700) }
+$evilFile = Join-Path $work 'evil-spaces.log'; Write-Log $evilFile $evilLines
+$swE = [Diagnostics.Stopwatch]::StartNew()
+$el = New-SmDnsLog; $el.ParseFile($evilFile, $null)
+$swE.Stop()
+Check ("Regex: Zeilen mit langen Leerraeumen (Leerzeichen im Namen und am Ende) werden in {0:N1} s gelesen, Ende abgeschnitten" -f $swE.Elapsed.TotalSeconds) ($el.RowCount -eq 400 -and $swE.Elapsed.TotalSeconds -lt 8 -and (Raw $el)[0].Name.Length -eq 255 -and (Raw $el)[0].Name.StartsWith('a' + $gap.Substring(0, 50)))
 $capLog = New-SmDnsLog -MaxRows 5
 $capLog.ParseFile((Join-Path $work 'clients.log'), $null)
 Check 'Zeilenlimit: Parser haelt bei MaxRows an und meldet gekuerzt' ($capLog.RowCount -eq 5 -and $capLog.Truncated)
@@ -353,9 +443,36 @@ if ($oldText) {
     $ErrorActionPreference = 'Stop'
     $oldUs = @(Import-Clixml ($usSmall + 'Parsed.XML'))
     Check 'Altbestand (Gegentest): Datum fest dd.MM.yyyy, US-Format liefert keine Zeit' (@($oldUs | Where-Object { -not $_.LogTime }).Count -ge 1)
+    if ($CompareOld) {
+        # Optional (-CompareOld): alter und neuer Parser auf derselben Datei, Zeiten werden ausgegeben. Standard 1 MB, damit es schnell bleibt.
+        $cmpLog = Join-Path $work 'compare.log'
+        $cmpLines = [SmTestGen]::Generate($cmpLog, [long]$CompareMB * 1MB, 'de', 11)
+        $env:SM_OLD_LOG = $cmpLog
+        $ErrorActionPreference = 'Continue'
+        $swO = [Diagnostics.Stopwatch]::StartNew()
+        $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $oldScript 2>&1
+        $swO.Stop()
+        $oldCmp = @(Import-Clixml ($cmpLog + 'Parsed.XML'))
+        Remove-Item ($cmpLog + 'Parsed.XML') -Force -ErrorAction SilentlyContinue
+        $swN = [Diagnostics.Stopwatch]::StartNew()
+        $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'DNSParser.ps1') -Path $cmpLog 2>&1
+        $swN.Stop()
+        $ErrorActionPreference = 'Stop'
+        $newCmp = @(Import-Clixml ($cmpLog + 'Parsed.XML'))
+        Remove-Item ($cmpLog + 'Parsed.XML') -Force -ErrorAction SilentlyContinue
+        $swI = [Diagnostics.Stopwatch]::StartNew()
+        $cl = New-SmDnsLog; $cl.ParseFile($cmpLog, $null)
+        $swI.Stop()
+        $cmpMb = (Get-Item $cmpLog).Length / 1MB
+        Write-Host ('INFO Vergleich {0:N1} MB, {1:N0} Zeilen: alter Parser {2:N1} s, neuer Parser (DNSParser.ps1 als Prozess, mit Start) {3:N1} s, nur die Engine im Prozess {4:N2} s, Faktor alt/neu {5:N0}x' -f $cmpMb, $cmpLines, $swO.Elapsed.TotalSeconds, $swN.Elapsed.TotalSeconds, $swI.Elapsed.TotalSeconds, ($swO.Elapsed.TotalSeconds / [math]::Max(0.001, $swN.Elapsed.TotalSeconds))) -ForegroundColor Cyan
+        Check ("Vergleich: gleiche Zeilenzahl (alt $($oldCmp.Count), neu $($newCmp.Count), Engine $($cl.RowCount))") ($oldCmp.Count -eq $cmpLines -and $newCmp.Count -eq $cmpLines -and $cl.RowCount -eq $cmpLines)
+        Check 'Vergleich: neuer Parser ist nicht langsamer als der alte' ($swN.Elapsed.TotalSeconds -lt $swO.Elapsed.TotalSeconds)
+        Remove-Item $cmpLog -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item Env:\SM_OLD_LOG -ErrorAction SilentlyContinue
 }
-else { Write-Host 'INFO git oder Altbestand (3326a3c) nicht verfuegbar, Gegentests gegen den Altbestand uebersprungen' -ForegroundColor Yellow }
+else { Write-Host 'INFO git oder Altbestand (3326a3c) nicht verfuegbar, Gegentests gegen den Altbestand und der Vergleich alt/neu uebersprungen' -ForegroundColor Yellow }
+if (-not $CompareOld) { Write-Host 'INFO Vergleich alter und neuer Parser: mit -CompareOld [-CompareMB n] einschaltbar (Standard aus)' -ForegroundColor DarkGray }
 foreach ($pf in $small, $usSmall) { $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'DNSParser.ps1') -Path $pf 2>&1 }
 $newRows = @(Import-Clixml ($small + 'Parsed.XML'))
 $newQ = @($newRows | Where-Object { $_.SendReceiveIdentifier -eq 'Rcv' })
@@ -379,18 +496,35 @@ Remove-Item ($small + 'Parsed.XML'), ($usSmall + 'Parsed.XML') -Force -ErrorActi
 # ---------------------------------------------------------------- 10. Server-Funktionen mit gemockten DnsServer-Cmdlets
 $stateDir = Join-Path $work 'state'
 $dnsDir = Join-Path $work 'dnsdir'; New-Item -ItemType Directory -Force $dnsDir | Out-Null
+# Test-Umgebung: erlaubter Log-Ordner ist ein Testordner, im Sicherungsordner darf auch der aktuelle Benutzer stehen (die Tests laufen nicht als SYSTEM)
+$script:SmDnsAllowedDirOverride = $dnsDir
+$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$script:SmDnsStateSidsOverride = @('S-1-5-32-544', 'S-1-5-18', $mySid)
+# Get-DnsServerDiagnostics liefert 'Update', Set-DnsServerDiagnostics hat dafuer 'Updates' (Microsoft-Doku). MaxMBFileSize ist in Byte (Beispiel der Doku: 500000000).
 $script:Diag = [pscustomobject]@{
-    EnableLoggingToFile = $false; LogFilePath = 'C:\Windows\System32\dns\dns.log'; MaxMBFileSize = [uint32]500000000
+    EnableLoggingToFile = $false; LogFilePath = (Join-Path $dnsDir 'dns.log'); MaxMBFileSize = [uint32]500000000
     Queries = $false; Answers = $true; SendPackets = $false; ReceivePackets = $false; UdpPackets = $false; TcpPackets = $true; Notifications = $false; Update = $false
+    FullPackets = $false; IPFilterList = $null; EnableLogFileRollover = $false; UnmatchedResponse = $false; WriteThrough = $false; QuestionTransactions = $false
+    EventLogLevel = [uint32]4; UseSystemEventLog = $false; SaveLogsToPersistentStorage = $false
 }
 $script:SetCalls = New-Object System.Collections.Generic.List[hashtable]
 function Test-SmAdmin { $script:IsAdmin }
 $script:IsAdmin = $true
 function Get-DnsServerDiagnostics { [CmdletBinding()]param() $script:Diag }
 function Set-DnsServerDiagnostics {
-    [CmdletBinding()]param([bool]$EnableLoggingToFile, [string]$LogFilePath, [uint32]$MaxMBFileSize, [bool]$Queries, [bool]$Answers, [bool]$SendPackets, [bool]$ReceivePackets, [bool]$UdpPackets, [bool]$TcpPackets, [bool]$Notifications, [bool]$Update)
-    $h = @{}; foreach ($k in $PSBoundParameters.Keys) { if ($script:Diag.PSObject.Properties[$k]) { $h[$k] = $PSBoundParameters[$k] } }; $script:SetCalls.Add($h)
-    foreach ($k in $h.Keys) { $script:Diag.$k = $h[$k] }
+    # Parameterliste wie in der Microsoft-Doku. Der Parametersatz verlangt je mindestens einen aus jeder Gruppe.
+    [CmdletBinding()]param(
+        [bool]$Answers, [bool]$FullPackets, [string[]]$IPFilterList, [string]$LogFilePath, [uint32]$MaxMBFileSize, [bool]$EnableLogFileRollover, [bool]$EnableLoggingToFile,
+        [bool]$UdpPackets, [bool]$TcpPackets, [bool]$UnmatchedResponse, [bool]$Updates, [bool]$WriteThrough, [bool]$Notifications, [bool]$Queries, [bool]$QuestionTransactions,
+        [bool]$ReceivePackets, [bool]$SendPackets, [uint32]$EventLogLevel, [bool]$UseSystemEventLog, [bool]$SaveLogsToPersistentStorage, [string]$ComputerName, [switch]$PassThru)
+    foreach ($g in @(@('ReceivePackets', 'SendPackets'), @('TcpPackets', 'UdpPackets'), @('Notifications', 'Updates', 'Queries'), @('QuestionTransactions', 'Answers'))) {
+        if (-not ($g | Where-Object { $PSBoundParameters.ContainsKey($_) })) { throw "Der Parametersatz verlangt mindestens einen von: $($g -join ', ')" }
+    }
+    $copy = @{}; foreach ($k in $PSBoundParameters.Keys) { $copy[$k] = $PSBoundParameters[$k] }; $script:SetCalls.Add($copy)
+    foreach ($k in $PSBoundParameters.Keys) {
+        $prop = if ($k -eq 'Updates') { 'Update' } else { $k }
+        if ($script:Diag.PSObject.Properties[$prop]) { $script:Diag.$prop = $PSBoundParameters[$k] }
+    }
 }
 function Get-DnsServerForwarder { [CmdletBinding()]param() [pscustomobject]@{ IPAddress = @([ipaddress]'10.0.0.88', [ipaddress]'10.0.0.89'); UseRootHint = $false } }
 function Get-DnsServerZone {
@@ -402,11 +536,18 @@ function Get-DnsServerZone {
 function Get-ADDomainController { [CmdletBinding()]param([string]$Filter) [pscustomobject]@{ HostName = 'dc02.contoso.local'; Site = 'Default-First-Site-Name'; IPv4Address = '10.0.0.2'; IPv6Address = $null } }
 
 $st = Get-SmDnsStatus
-Check 'Status: Logging aus, Pfad, Pakete (nur die eingeschalteten)' (-not $st.LoggingOn -and $st.Path -eq 'C:\Windows\System32\dns\dns.log' -and ($st.Packets -join ',') -eq 'Answers,TcpPackets' -and -not $st.LogExists)
-# Pfad
 $good = Join-Path $dnsDir 'dns.log'
+Check 'Status: Logging aus, Pfad, Pakete (nur die eingeschalteten, Update heisst im Set-Namen Updates)' (-not $st.LoggingOn -and $st.Path -eq $good -and ($st.Packets -join ',') -eq 'Answers,TcpPackets' -and -not $st.LogExists)
+Check 'Status: MaxMBFileSize steht in Byte, die Anzeige rechnet in MB (500000000 Byte = 476,8 MB)' ($st.MaxMB -eq 476.8)
+Check 'Groesse: MB nach Byte (500 MB = 524288000), Grenzen unter 4 GB (uint32)' ((ConvertTo-SmDnsMaxBytes -MB 500) -eq 524288000 -and (ConvertTo-SmDnsMaxBytes -MB 2048) -eq 2147483648 -and (ConvertTo-SmDnsMaxBytes -MB 4095) -eq 4293918720 -and (Throws { ConvertTo-SmDnsMaxBytes -MB 4096 }) -and (Throws { ConvertTo-SmDnsMaxBytes -MB 0 }) -and (ConvertTo-SmDnsMaxBytes -MB 500).GetType().Name -eq 'UInt32')
+# Pfad
 Check 'Pfad: gueltiger Pfad (Kurznamen werden aufgeloest)' ((Test-SmDnsLogPath -Path $good) -eq [IO.Path]::GetFullPath($good))
+$script:SmDnsAllowedDirOverride = $null
 Check 'Pfad: Standard %windir%\System32\dns\dns.log wird aufgeloest' ($(try { $x = Test-SmDnsLogPath -Path $script:SmDnsDefaultPath; $x -match '(?i)\\System32\\dns\\dns\.log$' } catch { $_.Exception.Message -match 'Ordner existiert nicht' }))
+$out506 = ''; try { [void](Test-SmDnsLogPath -Path 'C:\ProgramData\ServerMigration\dns.log') } catch { $out506 = $_.Exception.Message }
+Check 'Pfad: nur %windir%\System32\dns erlaubt (Windows Server 2025, CU 2026-11, Event 506), anderer Ordner mit klarer Meldung abgelehnt' ($out506 -match 'System32' -and $out506 -match '506' -and (Throws { Test-SmDnsLogPath -Path 'D:\Logs\dns.log' }) -and (Throws { Test-SmDnsLogPath -Path 'C:\Windows\System32\dns\sub\dns.log' }) -and (Throws { Test-SmDnsLogPath -Path 'C:\Windows\System32\drivers\dns.log' }))
+$script:SmDnsAllowedDirOverride = $dnsDir
+Check 'Pfad: Unterordner und Nachbarordner des erlaubten Ordners abgelehnt' ((Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir 'sub\dns.log') }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $work 'dns.log') }))
 Check 'Pfad: UNC, relativ, .., Laufwerk ohne Ordner, falsche Endung, Sonderzeichen abgelehnt' ((Throws { Test-SmDnsLogPath -Path '\\server\share\dns.log' }) -and (Throws { Test-SmDnsLogPath -Path 'dns.log' }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir '..\dns.log') }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir 'dns.exe') }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir 'a;b.log') }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir 'a$b.log') }) -and (Throws { Test-SmDnsLogPath -Path (Join-Path $dnsDir 'gibt\es\nicht.log') }) -and (Throws { Test-SmDnsLogPath -Path '%nichtda%\dns.log' }))
 $other = Join-Path $dnsDir 'setupapi.log'; [IO.File]::WriteAllText($other, 'fremde Datei', [Text.Encoding]::ASCII)
 Check 'Pfad: vorhandene Datei, die kein DNS-Log ist, wird nicht ueberschrieben' (Throws { Test-SmDnsLogPath -Path $other })
@@ -414,32 +555,35 @@ $own = Join-Path $dnsDir 'old.log'; [IO.File]::WriteAllText($own, 'DNS Server lo
 Check 'Pfad: vorhandenes DNS-Log ist erlaubt' ((Test-SmDnsLogPath -Path $own) -eq [IO.Path]::GetFullPath($own))
 # Vorpruefung
 $plan = Get-SmDnsEnablePlan -Path $good -MaxMB '500'
-Check 'Vorpruefung: ok, Pakete Queries, Answers, Send, Receive, UDP, TCP, Notify, Update' ($plan.Ok -and $plan.MaxMB -eq 500 -and ($plan.Packets -join ',') -eq 'Queries,Answers,SendPackets,ReceivePackets,UdpPackets,TcpPackets,Notifications,Update')
+Check 'Vorpruefung: ok, Pakete Queries, Answers, Send, Receive, UDP, TCP, Notify, Updates (Set-Name)' ($plan.Ok -and $plan.MaxMB -eq 500 -and ($plan.Packets -join ',') -eq 'Queries,Answers,SendPackets,ReceivePackets,UdpPackets,TcpPackets,Notifications,Updates')
 Check 'Vorpruefung: Groesse ausserhalb 10-2048, Text, leer' (-not (Get-SmDnsEnablePlan -Path $good -MaxMB '5').Ok -and -not (Get-SmDnsEnablePlan -Path $good -MaxMB '99999').Ok -and -not (Get-SmDnsEnablePlan -Path $good -MaxMB 'abc').Ok -and -not (Get-SmDnsEnablePlan -Path $good -MaxMB '').Ok)
 Check 'Vorpruefung: Platz auf dem Laufwerk (2048 MB passen nicht auf ein volles Laufwerk)' ($(try { $fr = (New-Object IO.DriveInfo ($dnsDir.Substring(0, 1))).AvailableFreeSpace; if ($fr -gt 2300MB) { $true } else { -not (Get-SmDnsEnablePlan -Path $good -MaxMB '2048').Ok } } catch { $true }))
 $script:IsAdmin = $false
 $noAdmin = Get-SmDnsEnablePlan -Path $good -MaxMB '500'
-Check 'Vorpruefung: ohne Administrator abgelehnt, und Einschalten verweigert' (-not $noAdmin.Ok -and ($noAdmin.Errors -join ' ') -match 'Administrator' -and (Throws { Enable-SmDnsLogging -Plan $noAdmin -StateDir $stateDir }) -and $script:SetCalls.Count -eq 0)
+Check 'Vorpruefung: ohne Administrator abgelehnt (klare Meldung: lokale Administratorrechte), und Einschalten verweigert' (-not $noAdmin.Ok -and ($noAdmin.Errors -join ' ') -match 'Administrator' -and ($noAdmin.Errors -join ' ') -match 'lokale Administratorrechte' -and (Throws { Enable-SmDnsLogging -Plan $noAdmin -StateDir $stateDir }) -and $script:SetCalls.Count -eq 0)
+Check 'Einschalten: auch ein Plan, der vorher als ok galt, wird ohne Administratorrechte verweigert' ($plan.Ok -and (Throws { Enable-SmDnsLogging -Plan $plan -StateDir $stateDir }) -and $script:SetCalls.Count -eq 0)
 $script:IsAdmin = $true
 # Einschalten
 $logLines = New-Object System.Collections.Generic.List[string]
 Enable-SmDnsLogging -Plan $plan -StateDir $stateDir -Log { param($m) $logLines.Add($m) }
 $call = $script:SetCalls[0]
-Check 'Einschalten: Set-DnsServerDiagnostics mit Pfad, Groesse und allen Paketen' ($call.EnableLoggingToFile -eq $true -and $call.LogFilePath -eq [IO.Path]::GetFullPath($good) -and $call.MaxMBFileSize -eq 500 -and $call.Queries -and $call.Answers -and $call.SendPackets -and $call.ReceivePackets -and $call.UdpPackets -and $call.TcpPackets -and $call.Notifications -and $call.Update)
+Check 'Einschalten: Set-DnsServerDiagnostics mit Pfad, Groesse in BYTE (500 MB = 524288000) und allen Paketen' ($call.EnableLoggingToFile -eq $true -and $call.LogFilePath -eq [IO.Path]::GetFullPath($good) -and $call.MaxMBFileSize -eq 524288000 -and $call.Queries -and $call.Answers -and $call.SendPackets -and $call.ReceivePackets -and $call.UdpPackets -and $call.TcpPackets -and $call.Notifications -and $call.Updates)
+Check 'Einschalten: der Parameter heisst Updates (nicht Update) und kommt wirklich an (Mock mit der Parameterliste der Doku)' (-not $call.ContainsKey('Update') -and $script:Diag.Update -eq $true -and $script:Diag.MaxMBFileSize -eq 524288000)
 Check 'Einschalten: Protokollzeile ohne Geheimnisse (Pfad, Groesse, Pakete)' (($logLines -join '|') -match 'DNS-Logging eingeschaltet' -and ($logLines -join '|') -match '500 MB' -and ($logLines -join '|') -notmatch '(?i)passw|kennwort|http|token')
 $stateFile = Join-Path $stateDir 'dns-diagnostics-before.json'
 $sv = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
-Check 'Einschalten: vorheriger Zustand gesichert' ((Test-Path $stateFile) -and $sv.Values.EnableLoggingToFile -eq $false -and $sv.Values.Answers -eq $true -and $sv.Values.Queries -eq $false -and $sv.Values.LogFilePath -eq 'C:\Windows\System32\dns\dns.log')
+Check 'Einschalten: vorheriger Zustand gesichert (Eigenschaftsnamen des Get, MaxMBFileSize in Byte)' ((Test-Path $stateFile) -and $sv.Values.EnableLoggingToFile -eq $false -and $sv.Values.Answers -eq $true -and $sv.Values.Queries -eq $false -and $sv.Values.Update -eq $false -and $sv.Values.MaxMBFileSize -eq 500000000 -and $sv.Values.LogFilePath -eq $good)
+Check 'Sicherungsordner: nach dem Einschalten gehaertet (Besitzer und Zugriffsliste nur erlaubte Konten)' (@(Test-SmDnsStateDirAcl -Path $stateDir).Count -eq 0)
 Check 'Status nach dem Einschalten: an' ((Get-SmDnsStatus).LoggingOn -and (Get-SmDnsStatus).MaxMB -eq 500)
 # Ausschalten stellt wieder her
 $script:SetCalls.Clear(); $logLines.Clear()
 Disable-SmDnsLogging -StateDir $stateDir -Log { param($m) $logLines.Add($m) }
 $d = $script:SetCalls[0]
-Check 'Ausschalten: EnableLoggingToFile false und der vorherige Zustand zurueck' ($d.EnableLoggingToFile -eq $false -and $d.Queries -eq $false -and $d.Answers -eq $true -and $d.TcpPackets -eq $true -and $d.UdpPackets -eq $false -and $d.LogFilePath -eq 'C:\Windows\System32\dns\dns.log')
+Check 'Ausschalten: EnableLoggingToFile false und der vorherige Zustand zurueck (Updates statt Update, Pfad, Byte-Groesse)' ($d.EnableLoggingToFile -eq $false -and $d.Queries -eq $false -and $d.Answers -eq $true -and $d.TcpPackets -eq $true -and $d.UdpPackets -eq $false -and $d.Updates -eq $false -and -not $d.ContainsKey('Update') -and $d.LogFilePath -eq [IO.Path]::GetFullPath($good) -and $d.MaxMBFileSize -eq 500000000)
 Check 'Ausschalten: Diagnose ist wie vorher, gesicherte Datei entfernt, Protokollzeile' ((-not $script:Diag.EnableLoggingToFile) -and $script:Diag.Queries -eq $false -and $script:Diag.Answers -eq $true -and $script:Diag.MaxMBFileSize -eq 500000000 -and -not (Test-Path $stateFile) -and ($logLines -join '|') -match 'wiederhergestellt')
 $script:SetCalls.Clear(); $logLines.Clear()
 Disable-SmDnsLogging -StateDir $stateDir -Log { param($m) $logLines.Add($m) }
-Check 'Ausschalten ohne gesicherten Zustand: nur ausschalten, klare Meldung' ($script:SetCalls[0].Keys.Count -eq 1 -and $script:SetCalls[0].EnableLoggingToFile -eq $false -and ($logLines -join '|') -match 'keinen gesicherten Zustand')
+Check 'Ausschalten ohne gesicherten Zustand: nur ausschalten, Pfad und Groesse unveraendert, Paketwerte durchgereicht (der Parametersatz verlangt sie), klare Meldung' ($script:SetCalls[0].EnableLoggingToFile -eq $false -and -not $script:SetCalls[0].ContainsKey('LogFilePath') -and -not $script:SetCalls[0].ContainsKey('MaxMBFileSize') -and $script:SetCalls[0].ContainsKey('Updates') -and $script:SetCalls[0].ContainsKey('ReceivePackets') -and ($logLines -join '|') -match 'keinen gesicherten Zustand')
 # manipulierte Zustandsdatei
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 [IO.File]::WriteAllText($stateFile, '{"Version":1,"Values":{"LogFilePath":"C:\\..\\Windows\\x.log","MaxMBFileSize":"abc","Queries":"ja","Answers":true,"Evil":"x"}}', [Text.Encoding]::ASCII)
@@ -447,6 +591,42 @@ $rs = Read-SmDnsState -StateDir $stateDir
 Check 'Zustandsdatei manipuliert: ungueltige Werte werden verworfen, nur gepruefte uebernommen' ($rs.Keys.Count -eq 1 -and $rs['Answers'] -eq $true)
 [IO.File]::WriteAllText($stateFile, 'kein json', [Text.Encoding]::ASCII)
 Check 'Zustandsdatei kaputt: ignoriert' ($null -eq (Read-SmDnsState -StateDir $stateDir))
+# wiederhergestellter LogFilePath geht durch dieselbe Pruefung wie Test-SmDnsLogPath (Ordner dns, Endung, Kopfzeile)
+function Test-StateRestore([string]$LogPath) {
+    [IO.File]::WriteAllText($stateFile, (@{ Version = 1; Values = @{ LogFilePath = $LogPath; Answers = $true } } | ConvertTo-Json -Depth 4), [Text.Encoding]::ASCII)
+    (Read-SmDnsState -StateDir $stateDir)
+}
+$rsOk = Test-StateRestore $good
+$rsOtherDir = Test-StateRestore 'C:\Windows\System32\drivers\etc\hosts'
+$rsOtherDir2 = Test-StateRestore (Join-Path $work 'dns.log')
+$rsExt = Test-StateRestore (Join-Path $dnsDir 'dns.exe')
+$rsHead = Test-StateRestore $other
+$rsOwn = Test-StateRestore $own
+Check 'Zustand wiederherstellen: LogFilePath nur im Ordner dns, mit .log/.txt und DNS-Kopfzeile, sonst verworfen' ($rsOk['LogFilePath'] -eq [IO.Path]::GetFullPath($good) -and -not $rsOtherDir.Contains('LogFilePath') -and -not $rsOtherDir2.Contains('LogFilePath') -and -not $rsExt.Contains('LogFilePath') -and -not $rsHead.Contains('LogFilePath') -and $rsOwn['LogFilePath'] -eq [IO.Path]::GetFullPath($own) -and $rsHead['Answers'] -eq $true)
+# Sicherungsordner: Besitzer und Zugriffsliste pruefen, Verknuepfungen ablehnen, ein fremdes Konto in der Zugriffsliste sperrt das Lesen
+$badDir = Join-Path $work 'statebad'; New-Item -ItemType Directory -Force $badDir | Out-Null
+$acl = Get-Acl -LiteralPath $badDir
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+Set-Acl -LiteralPath $badDir -AclObject $acl
+$problems = @(Test-SmDnsStateDirAcl -Path $badDir)
+Check 'Sicherungsordner: Zugriff fuer "Jeder" wird erkannt' ($problems.Count -ge 1 -and ($problems -join ' ') -match 'S-1-1-0')
+[IO.File]::WriteAllText((Join-Path $badDir 'dns-diagnostics-before.json'), '{"Version":1,"Values":{"Answers":true}}', [Text.Encoding]::ASCII)
+Check 'Sicherungsordner: Zustandsdatei in einem ungesicherten Ordner wird nicht gelesen' ($null -eq (Read-SmDnsState -StateDir $badDir))
+Protect-SmDnsStateDir -Path $badDir
+Check 'Sicherungsordner: Protect setzt Besitzer und Zugriffsliste neu und prueft sie (danach lesbar)' (@(Test-SmDnsStateDirAcl -Path $badDir).Count -eq 0 -and (Read-SmDnsState -StateDir $badDir)['Answers'] -eq $true)
+$ownerSid = (Get-Acl -LiteralPath $badDir).GetOwner([Security.Principal.SecurityIdentifier]).Value
+Check 'Sicherungsordner: nur erlaubte Konten in der Zugriffsliste, Vererbung aus ProgramData aus' ((Get-Acl -LiteralPath $badDir).AreAccessRulesProtected -and (@((Get-Acl -LiteralPath $badDir).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin $script:SmDnsStateSidsOverride }).Count -eq 0) -and $ownerSid -in $script:SmDnsStateSidsOverride)
+$strict = @(Test-SmDnsStateDirAcl -Path $badDir -AllowedSids @('S-1-5-18'))
+Check 'Sicherungsordner: ein nicht erlaubter Besitzer oder Eintrag fuehrt zum Abbruch (nur SYSTEM erlaubt: Test meldet Probleme)' ($strict.Count -ge 1)
+$junctionTarget = Join-Path $work 'junction-target'; New-Item -ItemType Directory -Force $junctionTarget | Out-Null
+$junction = Join-Path $work 'state-junction'
+try { [void](New-Item -ItemType Junction -Path $junction -Target $junctionTarget) } catch { }
+if (Test-Path $junction) {
+    $cBefore = $script:SetCalls.Count
+    Check 'Sicherungsordner: Verknuepfung (Junction) wird abgelehnt, nichts gesetzt' ((Throws { Protect-SmDnsStateDir -Path $junction }) -and (Throws { Save-SmDnsState -Before ([ordered]@{ EnableLoggingToFile = $false }) -StateDir $junction }) -and (Throws { Enable-SmDnsLogging -Plan $plan -StateDir $junction }) -and $script:SetCalls.Count -eq $cBefore)
+    [IO.Directory]::Delete($junction)
+}
+else { Write-Host 'INFO Junction konnte nicht angelegt werden, Test uebersprungen' -ForegroundColor Yellow }
 Remove-Item $stateFile -Force
 # Metadaten
 $mt = Get-SmDnsMeta
@@ -482,6 +662,10 @@ Check 'Hochladen: meta.json laesst sich vom Berater-Tool lesen (Server, Forwarde
 Check 'Hochladen: Fortschritt gemeldet, Temp-Ordner aufgeraeumt, Protokoll ohne Geheimnisse' ($script:prog.Count -ge 1 -and @(Get-ChildItem -LiteralPath $tmpRoot).Count -eq 0 -and ($msgs -join '|') -match 'Im Tauschordner')
 $ei = New-SmDnsLog; $e2 = Import-SmDnsZip -Log $ei -Path $script:Uploaded
 Check 'Ende zu Ende: ZIP vom Server wird im Berater-Tool eingelesen und ausgewertet' ($ei.RowCount -eq 11 -and @($ei.Query('Clients', '')).Count -ge 5 -and $e2.Meta.Forwarders -contains '10.0.0.88')
+$notLog = Join-Path $work 'notlog.log'; [IO.File]::WriteAllText($notLog, 'DNS Server log file creation (nicht)', [Text.Encoding]::ASCII)
+$elsewhere = Join-Path $work 'elsewhere.log'; [IO.File]::WriteAllText($elsewhere, 'DNS Server log file creation at 22.11.2026 14:00:00', [Text.Encoding]::ASCII)
+$script:Uploaded = $null
+Check 'Hochladen: Pfad, Endung und Kopfzeile werden wie beim Einschalten geprueft (fremde Datei, anderer Ordner, falsche Endung, keine Kopfzeile)' ((Throws { Publish-SmDnsLogs -Share @{} -LogPath $other -TempRoot $tmpRoot }) -and (Throws { Publish-SmDnsLogs -Share @{} -LogPath $elsewhere -TempRoot $tmpRoot }) -and (Throws { $x = Join-Path $dnsDir 'x.exe'; [IO.File]::WriteAllText($x, 'DNS Server log file creation at x', [Text.Encoding]::ASCII); Publish-SmDnsLogs -Share @{} -LogPath $x -TempRoot $tmpRoot }) -and (Throws { Publish-SmDnsLogs -Share @{} -LogPath 'C:\Windows\System32\drivers\etc\hosts' -TempRoot $tmpRoot }) -and -not $script:Uploaded)
 Check 'Hochladen: leere Datei und fehlende Datei abgelehnt' ((Throws { $e = Join-Path $dnsDir 'leer.log'; [IO.File]::WriteAllBytes($e, [byte[]]@()); Publish-SmDnsLogs -Share @{} -LogPath $e -TempRoot $tmpRoot }) -and (Throws { Publish-SmDnsLogs -Share @{} -LogPath (Join-Path $dnsDir 'nix.log') -TempRoot $tmpRoot }))
 Remove-Item Function:\Send-SmShareFile -ErrorAction SilentlyContinue
 . (Join-Path $repo 'Modules\SmTausch.ps1')

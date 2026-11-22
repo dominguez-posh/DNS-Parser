@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Berater-Tool, Seite DNS: ZIPs aus dem Tauschordner holen und auswerten, Ansichten, Filter, CSV-Export.
+    Berater-Tool, Seite DNS: ZIPs aus dem Tauschordner holen und auswerten, Ansichten, Filter, Export als Excel oder CSV.
 .DESCRIPTION
     Wird per Dot-Source geladen (braucht Modules\SmShell.ps1, SmTausch.ps1, SmDns.ps1). Die Rechenarbeit laeuft in Hintergrundauftraegen
     (Start-SmJob), die Oberflaeche bleibt bedienbar. Die Logik steckt in SmDns.ps1, hier nur Oberflaeche.
@@ -62,18 +62,18 @@ function Register-SmDnsPage {
             if (-not $c.Log -or $c.Busy) { return }
             $view = [string]$u.CmbDnsView.SelectedItem.Tag
             $dlg = New-Object Microsoft.Win32.SaveFileDialog
-            $dlg.Title = 'CSV speichern'; $dlg.Filter = 'CSV (*.csv)|*.csv'; $dlg.FileName = ('dns-{0}-{1:yyyyMMdd}.csv' -f $view, (Get-Date))
+            $dlg.Title = 'Tabelle speichern'; $dlg.Filter = 'Excel (*.xlsx)|*.xlsx|CSV (*.csv)|*.csv'; $dlg.FileName = ('dns-{0}-{1:yyyyMMdd}' -f $view, (Get-Date)); $dlg.AddExtension = $true; $dlg.DefaultExt = 'xlsx'
             if (-not $dlg.ShowDialog()) { return }
             $c.Busy = $true; $u.BtnDnsExport.IsEnabled = $false
             [void](Start-SmJob -Modules $c.Modules -Params @{ Log = $c.Log; View = $view; Filter = $u.TxtDnsFilter.Text; Path = $dlg.FileName } -Script {
                     param($State, $P)
-                    $P.Log.Export($P.View, $P.Filter, $P.Path, [char]';')
+                    Export-SmTable -Rows ($P.Log.Query($P.View, $P.Filter)) -Path $P.Path
                 } -OnDone {
                     param($result, $err)
                     $c2 = $script:SmDnsAdv; $c2.Busy = $false; $c2.Ui.BtnDnsExport.IsEnabled = $true
                     if ($err) { & $c2.AddLog ('DNS: Export fehlgeschlagen: ' + $err); return }
-                    & $c2.AddLog ('DNS: CSV exportiert, {0} Zeilen (Ansicht und Filter wie angezeigt).' -f $result[-1])
-                    Show-SmToast 'CSV exportiert.'
+                    & $c2.AddLog ('DNS: Tabelle exportiert, {0} Zeilen (Ansicht und Filter wie angezeigt).' -f $result[-1])
+                    Show-SmToast 'Tabelle exportiert.'
                 })
         })
 }
@@ -112,7 +112,7 @@ function Start-SmDnsLoad {
                     if ($f.Length -gt $script:SmDnsLimits.MaxZipBytes) { $State.Log.Enqueue("Zu gross, uebersprungen: $name"); continue }
                     if (-not $work) { $work = Join-Path $tempFull ('ServerMigration-dnsload-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $work) }
                     $zip = Join-Path $work $name
-                    Receive-SmShareFile -Share $P.Share -Name $name -OutFile $zip
+                    Receive-SmShareFile -Share $P.Share -Name $name -OutFile $zip -MaxBytes $script:SmDnsLimits.MaxZipBytes
                     $State.Text = 'Werte aus: ' + $name
                     $r = Import-SmDnsZip -Log $log -Path $zip -DateFormat $null
                     foreach ($w in $r.Warnings) { $State.Log.Enqueue("$name`: $w") }
@@ -173,6 +173,6 @@ function Show-SmDnsView {
             if ($err) { $u2.TxtDnsCount.Text = 'Fehler'; & $c2.AddLog ('DNS: ' + $err); return }
             $page = $result[-1]
             $u2.GrdDns.ItemsSource = $page.Items
-            $u2.TxtDnsCount.Text = if ($page.Cut) { 'Angezeigt: {0:N0} von {1:N0} Treffern. Der CSV-Export enthält alle Treffer.' -f $page.Items.Count, $page.Total } else { '{0:N0} Treffer' -f $page.Total }
+            $u2.TxtDnsCount.Text = if ($page.Cut) { 'Angezeigt: {0:N0} von {1:N0} Treffern. Der Export enthält alle Treffer.' -f $page.Items.Count, $page.Total } else { '{0:N0} Treffer' -f $page.Total }
         })
 }

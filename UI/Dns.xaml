@@ -49,6 +49,7 @@
                     <ComboBoxItem Tag="YMD" Content="yyyy-MM-dd"/>
                 </ComboBox>
                 <CheckBox x:Name="ChkDnsReverse" VerticalAlignment="Center"><TextBlock Text="Namen der Clients auflösen (Reverse, optional)" Foreground="{DynamicResource Text}"/></CheckBox>
+                <TextBlock Text="Fragt die internen IPs beim DNS des Berater-Rechners ab." Style="{DynamicResource Hint}" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </StackPanel>
             <ProgressBar x:Name="PrgDnsLoad" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
             <TextBlock x:Name="TxtDnsLoad" Style="{DynamicResource Hint}" Margin="0,6,0,0"/>

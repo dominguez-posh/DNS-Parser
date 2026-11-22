@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    DNS-Debug-Log: schneller Parser und Auswertung (Clients, DNS-Server-Erkennung, Fehler, Namen, Zonen, Typen, Updates/Notify, Rohdaten, CSV).
+    DNS-Debug-Log: schneller Parser und Auswertung (Clients, DNS-Server-Erkennung, Fehler, Namen, Zonen, Typen, Updates/Notify, Rohdaten).
 .DESCRIPTION
     Wird per Dot-Source geladen. Der Parser ist in C# geschrieben (Add-Type, kompiliert beim ersten Aufruf), damit 500 MB Log in
     wenigen Minuten verarbeitet werden: Streaming mit StreamReader, ein kompiliertes Regex, keine Arrays mit +=, keine Ausgabe je Zeile.
     Das Datum wird per Formatangabe (aus der Metadatei des Servers) gelesen, sonst automatisch erkannt (dd.MM.yyyy, M/d/yyyy,
     yyyy-MM-dd, mit und ohne AM/PM). Daten aus dem Tauschordner gelten als feindlich: Groessenlimits, ZIP-Inhalt nur als Leaf-Namen
-    (es wird nie nach Eintragsnamen entpackt, die Eintraege werden direkt gelesen), JSON nur als Daten, CSV ohne Formel-Injection.
+    (es wird nie nach Eintragsnamen entpackt, die Eintraege werden direkt gelesen), JSON nur als Daten, Export ueber Export-SmTable (Modules\SmExport.ps1) ohne Formel-Injection.
     Windows PowerShell 5.1. Datei bleibt ASCII.
 #>
 
@@ -89,15 +89,28 @@ public sealed class SmDnsRows
     }
 }
 
+// Gemeinsames Byte-Budget fuer alle Eintraege eines ZIPs (gelesene Bytes werden ueber alle Eintraege gezaehlt, nicht nur je Eintrag).
+public sealed class SmByteBudget
+{
+    public long Left; public long Used;
+    public SmByteBudget(long total) { Left = total; }
+}
+
 public sealed class SmLimitStream : Stream
 {
-    private readonly Stream inner; private readonly long limit; private long read;
-    public SmLimitStream(Stream inner, long limit) { this.inner = inner; this.limit = limit; }
+    private readonly Stream inner; private readonly long limit; private long read; private readonly SmByteBudget budget;
+    public SmLimitStream(Stream inner, long limit) : this(inner, limit, null) { }
+    public SmLimitStream(Stream inner, long limit, SmByteBudget budget) { this.inner = inner; this.limit = limit; this.budget = budget; }
     public override int Read(byte[] buffer, int offset, int count)
     {
         int n = inner.Read(buffer, offset, count);
         read += n;
         if (read > limit) throw new InvalidDataException("Eintrag ist entpackt groesser als das Limit.");
+        if (budget != null)
+        {
+            budget.Used += n; budget.Left -= n;
+            if (budget.Left < 0) throw new InvalidDataException("Das ZIP ist entpackt insgesamt groesser als das Limit.");
+        }
         return n;
     }
     public override bool CanRead { get { return true; } }
@@ -110,66 +123,6 @@ public sealed class SmLimitStream : Stream
     public override void SetLength(long v) { throw new NotSupportedException(); }
     public override void Write(byte[] b, int o, int c) { throw new NotSupportedException(); }
     protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
-}
-
-public static class SmCsv
-{
-    // Formel-Injection (Checkliste 7): Zellen, die mit = + - @ Tab oder CR beginnen, bekommen ein einfaches Anfuehrungszeichen davor.
-    public static string Escape(string s, char delim)
-    {
-        if (string.IsNullOrEmpty(s)) return "";
-        char c = s[0];
-        if (c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r') s = "'" + s;
-        if (s.IndexOf(delim) >= 0 || s.IndexOf('"') >= 0 || s.IndexOf('\r') >= 0 || s.IndexOf('\n') >= 0)
-            s = "\"" + s.Replace("\"", "\"\"") + "\"";
-        return s;
-    }
-    public static string Header(string name)
-    {
-        return Regex.Replace(name, "(?<=[a-z])(?=[A-Z])", " ");
-    }
-    public static string Value(object v, char delim)
-    {
-        if (v == null) return "";
-        string s = v as string;
-        if (s != null) return Escape(s, delim);
-        IFormattable f = v as IFormattable;
-        if (f != null) return Quote(f.ToString(null, delim == ';' ? CultureInfo.CurrentCulture : CultureInfo.InvariantCulture), delim);   // Zahlen und Zeiten: keine Formel
-        return Escape(v.ToString(), delim);
-    }
-    private static string Quote(string s, char delim)
-    {
-        if (s.IndexOf(delim) >= 0 || s.IndexOf('"') >= 0 || s.IndexOf((char)13) >= 0 || s.IndexOf((char)10) >= 0) s = "\"" + s.Replace("\"", "\"\"") + "\"";
-        return s;
-    }
-    public static long Write(IEnumerable items, string path, char delim)
-    {
-        long n = 0;
-        PropertyInfo[] props = null;
-        using (StreamWriter w = new StreamWriter(path, false, new UTF8Encoding(true), 65536))
-        {
-            foreach (object it in items)
-            {
-                if (props == null)
-                {
-                    props = it.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
-                    StringBuilder h = new StringBuilder();
-                    for (int i = 0; i < props.Length; i++) { if (i > 0) h.Append(delim); h.Append(Escape(Header(props[i].Name), delim)); }
-                    w.Write(h.ToString()); w.Write("\r\n");
-                }
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < props.Length; i++)
-                {
-                    if (i > 0) sb.Append(delim);
-                    sb.Append(Value(props[i].GetValue(it, null), delim));
-                }
-                w.Write(sb.ToString()); w.Write("\r\n");
-                n++;
-            }
-            if (props == null) w.Write("\r\n");
-        }
-        return n;
-    }
 }
 
 public sealed class SmClientStat : ISmDnsItem
@@ -276,12 +229,22 @@ public sealed class SmDnsLog
     private const int MaxLine = 4096;
     private const int SampleSize = 3000;
     private const byte BitTcp = 1, BitSnd = 2, BitResp = 4;
-    private static readonly Regex Rx = new Regex(
-        @"^\s*(\d{1,4}[./-]\d{1,2}[./-]\d{1,4})\s+(\d{1,2}:\d{2}:\d{2})(?:\s*([AaPp]\.?[Mm]\.?))?\s+([0-9A-Fa-f]+)\s+PACKET\s+([0-9A-Fa-f]+)\s+(UDP|TCP)\s+(Snd|Rcv)\s+([0-9A-Fa-f:.%]+)\s+([0-9A-Fa-f]{4})\s+(R)?\s*([A-Z?])\s+\[([0-9A-Fa-f]{4})\s+([A-Za-z ]*?)\s*([A-Za-z0-9_]+)\s*\]\s+(\S+)\s+(\S.*?)\s*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    // Der Name am Zeilenende ist (\S.*) ohne \s*$ dahinter: Feed schneidet vorher das Ende ab (TrimEnd), so gibt es kein quadratisches Backtracking.
+    // Zusaetzlich ein Zeitlimit je Zeile (feindliche Logs), eine Zeile die es reisst, zaehlt als uebersprungen.
+    public static int RegexTimeoutMs = 2000;
+    public static int MaxNames = 1000000, MaxIps = 500000, MaxNameLength = 255;
+    private const string Pattern = @"^\s*(\d{1,4}[./-]\d{1,2}[./-]\d{1,4})\s+(\d{1,2}:\d{2}:\d{2})(?:\s*([AaPp]\.?[Mm]\.?))?\s+([0-9A-Fa-f]+)\s+PACKET\s+([0-9A-Fa-f]+)\s+(UDP|TCP)\s+(Snd|Rcv)\s+([0-9A-Fa-f:.%]+)\s+([0-9A-Fa-f]{4})\s+(R)?\s*([A-Z?])\s+\[([0-9A-Fa-f]{4})\s+([A-Za-z ]*?)\s*([A-Za-z0-9_]+)\s*\]\s+(\S+)\s+(\S.*)$";
+    private static readonly Regex Rx = new Regex(Pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(RegexTimeoutMs));
+    public static TimeSpan MatchTimeout { get { return Rx.MatchTimeout; } }
+    private static Match TryMatch(string l)
+    {
+        try { return Rx.Match(l); } catch (RegexMatchTimeoutException) { return null; }
+    }
+    private static string Cut(string s, int max) { return s.Length > max ? s.Substring(0, max) : s; }
 
-    public readonly SmDnsTable Ips = new SmDnsTable(int.MaxValue, "");
-    public readonly SmDnsTable Names = new SmDnsTable(int.MaxValue, "");
+    // Feste Obergrenze fuer die Tabellen (feindliche Logs mit Millionen verschiedener Namen): Eintrag 0 sammelt den Rest als "(weitere)".
+    public readonly SmDnsTable Ips = new SmDnsTable(MaxIps, "(weitere)");
+    public readonly SmDnsTable Names = new SmDnsTable(MaxNames, "(weitere)");
     public readonly SmDnsTable Types = new SmDnsTable(255, "(andere)");
     public readonly SmDnsTable Rcodes = new SmDnsTable(255, "(andere)");
     public readonly SmDnsRows Rows = new SmDnsRows();
@@ -428,7 +391,7 @@ public sealed class SmDnsLog
     private void Decide()
     {
         List<string> dates = new List<string>(sample.Count);
-        foreach (string l in sample) { Match m = Rx.Match(l); if (m.Success) dates.Add(m.Groups[1].Value); }
+        foreach (string l in sample) { Match m = TryMatch(l); if (m != null && m.Success) dates.Add(m.Groups[1].Value); }
         int[] valid = new int[3]; int[] back = new int[3];
         for (int o = 0; o < 3; o++)
         {
@@ -509,6 +472,7 @@ public sealed class SmDnsLog
     private void Feed(string l)
     {
         Lines++;
+        l = l.TrimEnd();   // Leerraum am Ende weg, bevor der Regex laeuft
         if (l.Length < 40 || l.IndexOf(" PACKET ", StringComparison.Ordinal) < 0) return;
         if (!orderKnown) { sample.Add(l); if (sample.Count >= SampleSize) Decide(); return; }
         Process(l);
@@ -528,8 +492,9 @@ public sealed class SmDnsLog
 
     private void Process(string l)
     {
-        Match m = Rx.Match(l);
-        if (!m.Success) { Skipped++; return; }
+        Match m = TryMatch(l);
+        if (m == null || !m.Success) { Skipped++; return; }
+        if (m.Groups[8].Length > 64) { Skipped++; return; }
         long day = DayTicks(m.Groups[1].Value, ord);
         if (day < 0) { Skipped++; return; }
         long tt = TimeTicks(m.Groups[2].Value, m.Groups[3].Value);
@@ -548,15 +513,19 @@ public sealed class SmDnsLog
         if (m.Groups[10].Success && m.Groups[10].Length > 0) bits |= BitResp;
         r.Bits = bits;
         string ipRaw = m.Groups[8].Value; int ip;
-        if (!rawIps.TryGetValue(ipRaw, out ip)) { ip = Ips.Intern(NormIp(ipRaw)); rawIps[ipRaw] = ip; }
+        if (!rawIps.TryGetValue(ipRaw, out ip)) { ip = Ips.Intern(NormIp(ipRaw)); if (rawIps.Count < MaxIps) rawIps[ipRaw] = ip; }
         r.Ip = ip;
         r.Xid = (ushort)HexU(m.Groups[9].Value);
         r.Op = (byte)m.Groups[11].Value[0];
         r.FlagsHex = (ushort)HexU(m.Groups[12].Value);
-        r.Rcode = (byte)Rcodes.Intern(m.Groups[14].Value.ToUpperInvariant());
-        r.Type = (byte)Types.Intern(m.Groups[15].Value.ToUpperInvariant());
+        r.Rcode = (byte)Rcodes.Intern(Cut(m.Groups[14].Value, 32).ToUpperInvariant());
+        r.Type = (byte)Types.Intern(Cut(m.Groups[15].Value, 32).ToUpperInvariant());
         string nameRaw = m.Groups[16].Value; int nm;
-        if (!rawNames.TryGetValue(nameRaw, out nm)) { nm = Names.Intern(DecodeName(nameRaw).ToLowerInvariant()); rawNames[nameRaw] = nm; }
+        if (!rawNames.TryGetValue(nameRaw, out nm))
+        {
+            nm = Names.Intern(Cut(DecodeName(nameRaw), MaxNameLength).ToLowerInvariant());   // Namen hoechstens 255 Zeichen
+            if (rawNames.Count < MaxNames && nameRaw.Length <= 512) rawNames[nameRaw] = nm;
+        }
         r.Name = nm;
         Rows.Add(r);
     }
@@ -620,7 +589,7 @@ public sealed class SmDnsLog
             tn[p] = name; tc[p] = c;
         }
         List<SmClientStat> list = new List<SmClientStat>();
-        for (int ip = 1; ip < ni; ip++)
+        for (int ip = 0; ip < ni; ip++)
         {
             if (cnt[ip] + upd[ip] + notif[ip] == 0) continue;
             string ipText = Ips[ip], hintText; string role = Role(ipText, out hintText); string rev;
@@ -702,7 +671,7 @@ public sealed class SmDnsLog
         Dictionary<string, SmZoneStat> zs = new Dictionary<string, SmZoneStat>();
         Dictionary<string, HashSet<int>> zoneClients = new Dictionary<string, HashSet<int>>();
         string[] zoneOfName = new string[nn]; bool[] zoneOwn = new bool[nn];
-        for (int nm = 1; nm < nn; nm++)
+        for (int nm = 0; nm < nn; nm++)
         {
             if (cnt[nm] == 0) continue;
             bool own; string z = ZoneOf(Names[nm], out own); zoneOfName[nm] = z; zoneOwn[nm] = own;
@@ -918,10 +887,6 @@ public sealed class SmDnsLog
         }
         SmDnsViewResult r = new SmDnsViewResult(); r.Items = list; r.Total = total; r.Cut = total > list.Count; return r;
     }
-    public long Export(string view, string filter, string path, char delim)
-    {
-        return SmCsv.Write(Query(view, filter), path, delim);
-    }
 }
 '@
 
@@ -1025,6 +990,7 @@ function Import-SmDnsZip {
     $full = [IO.Path]::GetFullPath($Path)
     if ((Get-Item -LiteralPath $full).Length -gt $lim.MaxZipBytes) { throw 'Die ZIP-Datei ist zu gross.' }
     $zip = [IO.Compression.ZipFile]::OpenRead($full)
+    $budget = New-Object SmByteBudget -ArgumentList $lim.MaxTotalBytes   # gelesene Bytes ueber alle Eintraege
     $meta = $null
     try {
         if ($zip.Entries.Count -gt $lim.MaxZipEntries) { throw "Das ZIP hat zu viele Eintraege ($($zip.Entries.Count))." }
@@ -1032,6 +998,7 @@ function Import-SmDnsZip {
         foreach ($e in $zip.Entries) {
             $leaf = $e.Name
             if (-not $leaf) { continue }                                     # Ordnereintrag
+            if ($e.FullName.Length -gt 255 -or $leaf.Length -gt 255) { $warn.Add('Eintrag mit zu langem Namen uebersprungen.'); continue }
             if ($e.FullName -ne $leaf) { $warn.Add("Eintrag in Unterordner uebersprungen: $($e.FullName -replace '[^\w .\-/\\]', '?')"); continue }
             if ($leaf -notmatch '^[\w.\-]+$') { $warn.Add('Eintrag mit unerlaubtem Namen uebersprungen.'); continue }
             if ($leaf -ieq 'meta.json' -or $leaf -match '(?i)\.log$') { $good += $e } else { $warn.Add("Eintrag uebersprungen: $leaf") }
@@ -1040,7 +1007,7 @@ function Import-SmDnsZip {
         if ($metaEntry) {
             if ($metaEntry.Length -gt $lim.MaxMetaBytes) { $warn.Add('meta.json ist zu gross und wurde nicht gelesen.') }
             else {
-                $st = New-Object SmLimitStream -ArgumentList $metaEntry.Open(), $lim.MaxMetaBytes
+                $st = New-Object SmLimitStream -ArgumentList $metaEntry.Open(), $lim.MaxMetaBytes, $budget
                 try {
                     $sr = New-Object IO.StreamReader($st, [Text.Encoding]::UTF8)
                     try { $json = $sr.ReadToEnd() } finally { $sr.Dispose() }
@@ -1057,7 +1024,7 @@ function Import-SmDnsZip {
         if ($declared -gt $lim.MaxTotalBytes) { throw 'Die Logs im ZIP sind zusammen zu gross.' }
         foreach ($e in ($good | Where-Object { $_.Name -match '(?i)\.log$' })) {
             if ($e.Length -gt $lim.MaxLogBytes) { $warn.Add("Log zu gross, uebersprungen: $($e.Name)"); continue }
-            $st = New-Object SmLimitStream -ArgumentList $e.Open(), $lim.MaxLogBytes
+            $st = New-Object SmLimitStream -ArgumentList $e.Open(), $lim.MaxLogBytes, $budget
             try {
                 Read-SmDnsStream -Log $Log -Stream $st -Length $e.Length -Order $order -Name $e.Name -Progress $Progress
             }
@@ -1100,26 +1067,6 @@ function Resolve-SmDnsReverse {
         }
     }
     $res
-}
-
-function Export-SmCsv {
-    <# Schreibt Objekte als CSV (UTF-8 mit BOM, Trenner ; fuer deutsches Excel). Texte, die mit = + - @ Tab oder CR beginnen, bekommen ein ' davor (Formel-Injection). #>
-    param([Parameter(Mandatory)][object[]]$Items, [Parameter(Mandatory)][string]$Path, [char]$Delimiter = ';')
-    Initialize-SmDnsEngine
-    $first = $Items | Select-Object -First 1
-    $props = if ($first) { @($first.PSObject.Properties | ForEach-Object Name) } else { @() }
-    $enc = New-Object Text.UTF8Encoding $true
-    $w = New-Object IO.StreamWriter($Path, $false, $enc)
-    $n = 0
-    try {
-        $w.Write((($props | ForEach-Object { [SmCsv]::Escape([SmCsv]::Header($_), $Delimiter) }) -join $Delimiter) + "`r`n")
-        foreach ($it in $Items) {
-            $w.Write((($props | ForEach-Object { [SmCsv]::Value($it.$_, $Delimiter) }) -join $Delimiter) + "`r`n")
-            $n++
-        }
-    }
-    finally { $w.Dispose() }
-    $n
 }
 
 function Get-SmDnsCompatRows {

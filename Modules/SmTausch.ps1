@@ -115,9 +115,40 @@ function Get-SmShareFiles {
 }
 
 function Receive-SmShareFile {
-    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$OutFile)
+    <#
+    .SYNOPSIS
+        Laedt eine Datei aus dem Tauschordner und bricht ab, sobald mehr als MaxBytes ankommen (Angabe im Kopf oder gelesene Bytes).
+        Die teilweise geladene Datei wird dann geloescht.
+    #>
+    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$OutFile, [long]$MaxBytes = 2GB)
+    Initialize-SmWeb
     $u = '{0}/_api/web/GetFileByServerRelativeUrl(@f)/$value?@f={1}' -f $Share.Web, (Format-SmSpString ($Share.Folder + '/' + $Name))
-    Invoke-SmShareApi -Share $Share -Uri $u -OutFile $OutFile
+    $req = [Net.HttpWebRequest][Net.WebRequest]::Create($u)
+    $req.Method = 'GET'; $req.Accept = 'application/json;odata=nometadata'; $req.AllowAutoRedirect = $true; $req.MaximumAutomaticRedirections = 10
+    $req.Timeout = 120000; $req.ReadWriteTimeout = 120000
+    if ($Share.Session) {
+        if ($Share.Session.Cookies) { $req.CookieContainer = $Share.Session.Cookies }
+        if ($Share.Session.UserAgent) { $req.UserAgent = $Share.Session.UserAgent }
+    }
+    $resp = $req.GetResponse()
+    try {
+        if (-not (Test-SmFinalHost -Final $resp.ResponseUri -Authority ([string]$Share.Authority) -AnyHost:([bool]$Share.AnyHost))) { throw 'Der Download wurde auf ein unerlaubtes Ziel weitergeleitet. Abgebrochen.' }
+        if ($resp.ContentLength -gt $MaxBytes) { throw ('Die Datei ist groesser als das Limit ({0:N0} Bytes).' -f $MaxBytes) }
+        $src = $resp.GetResponseStream()
+        $dst = [IO.File]::Open($OutFile, 'Create', 'Write', 'None')
+        $ok = $false
+        try {
+            $buf = New-Object byte[] (1MB); $total = 0L
+            while (($n = $src.Read($buf, 0, $buf.Length)) -gt 0) {
+                $total += $n
+                if ($total -gt $MaxBytes) { throw ('Der Download ist groesser als das Limit ({0:N0} Bytes), abgebrochen.' -f $MaxBytes) }
+                $dst.Write($buf, 0, $n)
+            }
+            $ok = $true
+        }
+        finally { $dst.Dispose(); $src.Dispose(); if (-not $ok) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue } }
+    }
+    finally { $resp.Close() }
 }
 
 function Get-SmChunkPlan {
