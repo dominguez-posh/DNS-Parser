@@ -116,7 +116,7 @@ $f2 = Join-Path $printDir 'Print-Export-SRV01-20261122-100000.printerExport'; [I
 $f3 = Join-Path $adDir 'AD-Bericht-SRV01-20261122-100000.json'; [IO.File]::WriteAllText($f3, '{"Schema":1}')
 [void](Add-SmAsStaged -State $st -Source 'PrintExport' -Kind 'PrintExport' -Path $f2); [void](Add-SmAsStaged -State $st -Source 'Ad' -Kind 'AdReport' -Path $f3)
 Check 'Vormerken: Dateien aus Print und AD gehen auch (gehaertete Ordner)' ($st.Staged.Count -eq 3)
-$outside = Join-Path $Work 'ausserhalb.zip'; [IO.File]::WriteAllBytes($outside, [byte[]](1..9))
+$outside = Join-Path $Work 'SM-DNS-ausserhalb.zip'; [IO.File]::WriteAllBytes($outside, [byte[]](1..9))
 Check 'Vormerken: Datei ausserhalb der erlaubten Ordner wird abgelehnt' (Throws { Add-SmAsStaged -State $st -Source 'Dns' -Kind 'DnsLogs' -Path $outside })
 Check 'Vormerken: Unterordner eines erlaubten Ordners wird abgelehnt' (Throws { New-Item -ItemType Directory -Force (Join-Path $stage 'sub') | Out-Null; [IO.File]::WriteAllBytes((Join-Path $stage 'sub\a.zip'), [byte[]](1..9)); Add-SmAsStaged -State $st -Source 'Dns' -Kind 'DnsLogs' -Path (Join-Path $stage 'sub\a.zip') })
 $bad = Join-Path $stage 'mit leerzeichen.zip'; [IO.File]::WriteAllBytes($bad, [byte[]](1..9))
@@ -341,9 +341,9 @@ if ($Share -and $Store) {
     Check 'DHCP-Feld: falsche oder zu lange Summe in der DHCP-Zeile ist kein Treffer' (-not (Test-SmDhcpShaMatch -Expected $shD -Entered ('DHCP-Export-X.zip: ' + $shE)) -and -not (Test-SmDhcpShaMatch -Expected $shD -Entered ('DHCP-Export-X.zip: ' + $shD + '0')))
     Check 'Print-Felder: derselbe Ausgabetext (mit DHCP- und DNS-Zeile) liefert Export und Inventur, Zeilennamen passen' ((Test-SmShaMatch -Entered (Get-SmPastedSha $csAll 'Export') -Actual $shE) -and (Test-SmShaMatch -Entered (Get-SmPastedSha $csAll 'Inventur') -Actual $shI))
     Check 'Upload: ohne Dateien wirft eine klare Meldung' (Throws { Publish-SmAsItems -Share $Share -Items @() -Roots $roots })
-    $outsideItem = [pscustomobject]@{ Name = 'ausserhalb.zip'; Source = 'Dns'; Kind = 'DnsLogs'; Length = 9; Sha256 = ('0' * 64); Path = $outside }
+    $outsideItem = [pscustomobject]@{ Name = 'SM-DNS-ausserhalb.zip'; Source = 'Dns'; Kind = 'DnsLogs'; Length = 9; Sha256 = ('0' * 64); Path = $outside }
     $ro = @(Publish-SmAsItems -Share $Share -Items @($outsideItem) -Roots $roots)
-    Check 'Upload: ein Pfad ausserhalb der erlaubten Ordner wird nicht hochgeladen (Pfad wird beim Hochladen erneut geprueft)' ($ro.Count -eq 1 -and -not $ro[0].Ok -and $ro[0].Error -match 'erlaubten Ordner' -and -not $Store.ContainsKey('ausserhalb.zip'))
+    Check 'Upload: ein Pfad ausserhalb der erlaubten Ordner wird nicht hochgeladen (Pfad wird beim Hochladen erneut geprueft)' ($ro.Count -eq 1 -and -not $ro[0].Ok -and $ro[0].Error -match 'erlaubten Ordner' -and -not $Store.ContainsKey('SM-DNS-ausserhalb.zip'))
     Remove-SmAsStageDir -Dir $stage
 }
 else { Write-Host 'INFO kein SharePoint-Nachbau uebergeben: Upload-Pruefungen entfallen (laufen in tests\Test-ServerMigration.ps1)' -ForegroundColor Yellow }
