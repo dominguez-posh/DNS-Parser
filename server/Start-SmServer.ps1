@@ -32,46 +32,15 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $root 'server\SmPrintServer.ps1')
 . (Join-Path $root 'Modules\SmAd.ps1')
 . (Join-Path $root 'server\SmAdServer.ps1')
+. (Join-Path $root 'server\SmAssistent.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'))
 $adJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmAd.ps1'), (Join-Path $root 'server\SmAdServer.ps1'))
 $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'))
 $dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'), (Join-Path $root 'server\SmDhcpServer.ps1'))
+$assistModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'), (Join-Path $root 'server\SmDhcpServer.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'), (Join-Path $root 'server\SmPrintServer.ps1'), (Join-Path $root 'Modules\SmAd.ps1'), (Join-Path $root 'server\SmAdServer.ps1'), (Join-Path $root 'server\SmAssistent.ps1'))
 $printModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'), (Join-Path $root 'server\SmPrintServer.ps1'))
 
-$startPage = @'
-<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
-    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
-        <TextBlock Text="Dieser Server" Style="{DynamicResource PageTitle}"/>
-        <TextBlock x:Name="TxtServer" Style="{DynamicResource Subtitle}"/>
-        <Border x:Name="BoxAdmin" Style="{DynamicResource WarnBand}" Margin="0,16,0,0" Visibility="Collapsed">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Left" Style="{DynamicResource BandGlyph}" Foreground="{DynamicResource Warning}" Text="&#xE7BA;"/>
-                <TextBlock Style="{DynamicResource BandText}" Text="Dieses Fenster läuft nicht als Administrator. Für Änderungen bitte PowerShell mit 'Als Administrator ausführen' öffnen und den Einzeiler erneut einfügen."/>
-            </DockPanel>
-        </Border>
-
-        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
-            <StackPanel>
-                <TextBlock Text="Tauschordner" Style="{DynamicResource CardTitle}"/>
-                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                    <Button x:Name="BtnRefresh" Content="Ordner prüfen" Tag="&#xE72C;" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
-                    <TextBlock x:Name="TxtShareState" Text="Kein Tauschordner (nur lokal)" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
-                </StackPanel>
-                <TextBox x:Name="TxtFiles" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" MaxHeight="140" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" Visibility="Collapsed"/>
-                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                    <Button x:Name="BtnUpload" Content="Datei hochladen …" Tag="&#xE898;" IsEnabled="False" Margin="0,0,12,0"/>
-                    <TextBlock x:Name="TxtProgress" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
-                </StackPanel>
-                <ProgressBar x:Name="PrgUpload" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-            </StackPanel>
-        </Border>
-
-        <!--PROTOKOLL-->
-    </StackPanel>
-</ScrollViewer>
-'@
-
-$startPage = $startPage.Replace('<!--PROTOKOLL-->', (Get-SmLogCardXaml))
+$startPage = Get-SmAssistantPageXaml -Root $root   # UI\ServerStart.xaml: gefuehrter Ablauf (server\SmAssistent.ps1)
 $pages = @(
     @{ Key = 'Start'; Title = 'Dieser Server'; Glyph = 0xE977; Xaml = $startPage }
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\DnsServer.xaml'), [Text.Encoding]::UTF8) }
@@ -81,8 +50,8 @@ $pages = @(
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Server-Fenster' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
-Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'TxtFiles', 'BtnUpload', 'TxtProgress', 'PrgUpload',
-    'TxtDnsState', 'TxtDnsDetail', 'BtnDnsRefresh', 'BoxDnsEnable', 'TxtDnsPath', 'TxtDnsMax', 'BtnDnsEnable', 'BoxDnsOn', 'BtnDnsDisable', 'BoxDnsLogs', 'TxtDnsLogInfo', 'BtnDnsUpload', 'TxtDnsProgress', 'PrgDns',
+Test-SmWindowNames (Get-SmAssistantUiNames)
+Test-SmWindowNames @('TxtDnsState', 'TxtDnsDetail', 'BtnDnsRefresh', 'BoxDnsEnable', 'TxtDnsPath', 'TxtDnsMax', 'BtnDnsEnable', 'BoxDnsOn', 'BtnDnsDisable', 'BoxDnsLogs', 'TxtDnsLogInfo', 'BtnDnsUpload', 'TxtDnsProgress', 'PrgDns',
     'NavStart', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 Test-SmWindowNames @('BtnDhcpCheck', 'TxtDhcpCheck', 'BtnDhcpExport', 'TxtDhcpExport', 'PrgDhcpExport', 'TxtDhcpExportSha', 'ChkDhcpNoLeases', 'BtnDhcpCopySha', 'ChkDhcpAfterNoLeases', 'TxtDhcpShaIn', 'TxtDhcpShaState', 'BtnDhcpFind', 'BtnDhcpDownload', 'LstDhcpExports', 'TxtDhcpDlSha', 'BtnDhcpOpen',
     'BoxDhcpImport', 'TxtDhcpInfo', 'RdoDhcpAll', 'RdoDhcpSel', 'LstDhcpScopes', 'ChkDhcpLeases', 'BtnDhcpImport', 'TxtDhcpImport', 'BtnDhcpAuth', 'TxtDhcpAuth', 'BtnDhcpAfter', 'TxtDhcpAfter', 'BtnDhcpOldList', 'LstDhcpOldScopes', 'BtnDhcpDeactivate')
@@ -120,11 +89,12 @@ function Update-Share {
         } -OnDone {
             param($result, $err)
             $ui.BtnRefresh.IsEnabled = $true
-            if ($err) { $script:Share = $null; $ui.BtnUpload.IsEnabled = $false; $ui.TxtShareState.Text = 'Nicht erreichbar'; Add-Log ('Tauschordner: ' + $err); return }
+            if ($err) { $script:Share = $null; $ui.BtnUpload.IsEnabled = $false; $ui.TxtShareState.Text = 'Nicht erreichbar'; Add-Log ('Tauschordner: ' + $err); Start-SmAsCheck -Auto; return }
             $r = $result[-1]
             $script:Share = $r.Share
             $ui.TxtShareState.Text = 'Verbunden: ' + $r.Share.Name
             $ui.BtnUpload.IsEnabled = $true
+            Start-SmAsCheck -Auto
             $ui.TxtFiles.Text = if (@($r.Files).Count) { (@($r.Files) | ForEach-Object { '{0}  ({1})' -f $_.Name, (Format-SmSize $_.Length) }) -join "`r`n" } else { '(Ordner ist leer)' }
             $ui.TxtFiles.Visibility = 'Visible'
             Add-Log ('Tauschordner verbunden: {0} ({1} Dateien)' -f $r.Share.Name, @($r.Files).Count)
@@ -147,6 +117,7 @@ $ui.BtnUpload.Add_Click({
             } -OnDone {
                 param($result, $err)
                 $ui.BtnUpload.IsEnabled = $true
+            Start-SmAsCheck -Auto
                 if ($err) { $ui.TxtProgress.Text = 'Fehlgeschlagen'; Add-Log ('Fehler: ' + $err); return }
                 $ui.TxtProgress.Text = 'Fertig'
                 Add-Log ('Im Tauschordner: {0} ({1})' -f $result[-1].Name, (Format-SmSize $result[-1].Length))
@@ -159,15 +130,18 @@ if (-not $ShareLink) { Add-Log 'Kein Tauschordner angegeben (nur lokal).' }
 Register-SmAdServerPage -Ui $ui -JobModules $adJobModules -AddLog { param($m) Add-Log $m } -GetShare { $script:Share }
 Register-SmDnsServerPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Register-SmDhcpServerPage -Ui $ui -JobModules $dhcpJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
+Initialize-SmAssistantPage -Ui $ui -JobModules $assistModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m } -RefreshShare { Update-Share }
 Select-SmPage 'Start'
 # Verwaiste Arbeitsordner frueherer Laeufe (aelter als 24 h, nur Besitzer Administratoren/SYSTEM) wegraeumen
 try {
-    $orphans = [int](Clear-SmDhcpOrphans) + [int](Clear-SmPrintOrphans) + [int](Clear-SmDnsOrphans)
+    $orphans = [int](Clear-SmDhcpOrphans) + [int](Clear-SmPrintOrphans) + [int](Clear-SmDnsOrphans) + [int](Clear-SmAsOrphans)
     if ($orphans) { Add-Log ('Verwaiste Arbeitsordner frueherer Laeufe geloescht: {0}' -f $orphans) }
 }
 catch { Add-Log ('Aufraeumen verwaister Arbeitsordner: ' + $_.Exception.Message) }
+if (-not $ShareLink) { Start-SmAsCheck -Auto }
 Update-Share
 [void]$w.Window.ShowDialog()
 # Fenster geschlossen: Arbeitsordner dieser Sitzung aufraeumen (Handles zu, Import-/Export-Ordner weg)
 try { Close-SmDhcpPage } catch { }
 try { Close-SmPrintPage } catch { }
+try { Close-SmAssistantPage } catch { }

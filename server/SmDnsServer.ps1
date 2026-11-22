@@ -19,8 +19,9 @@ $script:SmDnsPacketMap = [ordered]@{
 }
 # Set-DnsServerDiagnostics verlangt je mindestens einen Parameter aus jeder Gruppe, deshalb gehen immer alle acht Pakete mit.
 $script:SmDnsStateProps = @('EnableLoggingToFile', 'LogFilePath', 'MaxMBFileSize') + @($script:SmDnsPacketMap.Keys)
-# MaxMBFileSize heisst nur so: Die Einheit ist Byte (Beispiel der Doku: 500000000). Die Oberflaeche rechnet in MB.
+# MaxMBFileSize heisst nur so: Die Einheit ist Byte (Windows-Standard und Beispiel der Doku: 500000000). Die Oberflaeche rechnet in dezimalen MB (1 MB = 1.000.000 Byte), damit 500000000 als 500 MB erscheint.
 $script:SmDnsMaxBytesLimit = [uint32]::MaxValue
+$script:SmDnsBytesPerMB = 1000000L
 $script:SmDnsAdminText = 'Fuer das Setzen der Logdatei braucht Set-DnsServerDiagnostics lokale Administratorrechte. Bitte das Server-Fenster als Administrator starten.'
 
 function Test-SmAdmin {
@@ -115,19 +116,19 @@ function Clear-SmDnsOrphans {
 }
 
 function ConvertTo-SmDnsMaxBytes {
-    <# MB (Oberflaeche) -> Byte (MaxMBFileSize). Wirft, wenn der Wert nicht in uint32 passt (unter 4 GB). #>
+    <# Dezimale MB (Oberflaeche, 1 MB = 1.000.000 Byte) -> Byte (MaxMBFileSize). Wirft, wenn der Wert nicht in uint32 passt (unter 4294 MB). #>
     param([Parameter(Mandatory)][long]$MB)
     if ($MB -lt 1) { throw 'Die Groesse muss mindestens 1 MB sein.' }
-    $b = [long]$MB * 1MB
-    if ($b -ge $script:SmDnsMaxBytesLimit) { throw 'Die Groesse muss unter 4096 MB liegen (MaxMBFileSize ist ein 32-Bit-Wert in Byte).' }
+    $b = [long]$MB * $script:SmDnsBytesPerMB
+    if ($b -ge $script:SmDnsMaxBytesLimit) { throw 'Die Groesse muss unter 4294 MB liegen (MaxMBFileSize ist ein 32-Bit-Wert in Byte).' }
     [uint32]$b
 }
 
 function ConvertFrom-SmDnsMaxBytes {
-    <# Byte (MaxMBFileSize) -> MB fuer die Anzeige. #>
+    <# Byte (MaxMBFileSize) -> dezimale MB fuer die Anzeige (500000000 Byte = 500 MB). #>
     param($Bytes)
     if ($null -eq $Bytes) { return $null }
-    [math]::Round([double]$Bytes / 1MB, 1)
+    [math]::Round([double]$Bytes / $script:SmDnsBytesPerMB, 1)
 }
 
 function Get-SmDnsDiagnostics {
@@ -145,13 +146,17 @@ function Get-SmDnsStatus {
     <# Status des Loggings: an oder aus, Pfad, Groesse, welche Pakete, ob eine Logdatei da ist. #>
     $h = Get-SmDnsDiagnostics
     $path = [string]$h['LogFilePath']
-    $exp = if ($path) { [Environment]::ExpandEnvironmentVariables($path) } else { '' }
+    # Ist das Logging an und der Pfad leer, schreibt Windows nach %windir%\System32\dns\dns.log (Get-DnsServerDiagnostics liefert dann nichts).
+    $isDefault = [string]::IsNullOrWhiteSpace($path)
+    if ($isDefault) { $path = $script:SmDnsDefaultPath }
+    $exp = [Environment]::ExpandEnvironmentVariables($path)
     $exists = $false; $bytes = 0L
     if ($exp) { try { if (Test-Path -LiteralPath $exp -PathType Leaf) { $exists = $true; $bytes = (Get-Item -LiteralPath $exp -Force).Length } } catch { } }
     $pk = @($script:SmDnsPacketMap.Keys | Where-Object { $h.Contains($_) -and $h[$_] -eq $true } | ForEach-Object { $script:SmDnsPacketMap[$_] })
     [pscustomobject]@{
         LoggingOn   = [bool]$h['EnableLoggingToFile']
         Path        = $path
+        PathIsDefault = $isDefault
         FullPath    = $exp
         MaxMB       = ConvertFrom-SmDnsMaxBytes $h['MaxMBFileSize']
         Packets     = $pk
@@ -162,7 +167,8 @@ function Get-SmDnsStatus {
 
 function Test-SmDnsLogPath {
     <# Prueft den Pfad der Logdatei. Liefert den vollen Pfad oder wirft einen Fehler. Der DNS-Dienst (SYSTEM) schreibt dorthin, deshalb streng. #>
-    param([Parameter(Mandatory)][string]$Path)
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = $script:SmDnsDefaultPath }   # leerer Pfad = Windows-Standard
     $p = [Environment]::ExpandEnvironmentVariables($Path.Trim())
     if ($p -match '%') { throw 'Der Pfad enthaelt eine unbekannte Umgebungsvariable.' }
     if ($p -notmatch '^[A-Za-z]:\\[\w ~.\-\\()]+$' -or $p -match '\.\.' -or $p -match '\\\\') {
@@ -188,7 +194,7 @@ function Test-SmDnsLogPath {
 
 function Get-SmDnsEnablePlan {
     <# Vorpruefung fuer "Logging einschalten": Rechte, Cmdlets, Pfad, Groesse, freier Platz. Aendert nichts. #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$MaxMB)
+    param([AllowEmptyString()][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$MaxMB)
     $err = New-Object System.Collections.Generic.List[string]
     $warn = New-Object System.Collections.Generic.List[string]
     $full = $null; $mb = 0
@@ -200,7 +206,7 @@ function Get-SmDnsEnablePlan {
     if ($full -and $mb) {
         try {
             $free = (New-Object IO.DriveInfo ($full.Substring(0, 1))).AvailableFreeSpace
-            if ($free -lt ($mb * 1MB * 1.1)) { $err.Add(('Auf dem Laufwerk sind nur {0:N0} MB frei, gebraucht werden etwa {1:N0} MB.' -f ($free / 1MB), ($mb * 1.1))) }
+            if ($free -lt ($mb * $script:SmDnsBytesPerMB * 1.1)) { $err.Add(('Auf dem Laufwerk sind nur {0:N0} MB frei, gebraucht werden etwa {1:N0} MB.' -f ($free / $script:SmDnsBytesPerMB), ($mb * 1.1))) }
         }
         catch { $warn.Add('Der freie Platz konnte nicht geprueft werden.') }
     }
@@ -382,6 +388,7 @@ function New-SmDnsLogZip {
     if (-not $srv) { $srv = 'server' }
     $name = 'SM-DNS-{0}-{1}.zip' -f $srv, (Get-Date -Format 'yyyyMMdd-HHmmss')
     $target = Join-Path $OutDir $name
+    $n = 1; while (Test-Path -LiteralPath $target) { $n++; $target = Join-Path $OutDir ([IO.Path]::GetFileNameWithoutExtension($name) + '-' + $n + '.zip') }   # zweites Sammeln in derselben Sekunde
     $zip = [IO.Compression.ZipFile]::Open($target, 'Create')
     try {
         Add-SmZipEntryShared -Zip $zip -EntryName 'dns.log' -Path $LogPath -Progress $Progress
@@ -393,31 +400,46 @@ function New-SmDnsLogZip {
     $target
 }
 
+function New-SmDnsLogPackage {
+    <#
+    .SYNOPSIS
+        Sammeln ohne Hochladen: packt die DNS-Logdatei mit Metadaten als ZIP in OutDir und liefert Path, Name und Length.
+    .DESCRIPTION
+        Der Pfad geht durch Test-SmDnsLogPath (leer = Windows-Standard %windir%\System32\dns\dns.log). Platz auf dem Laufwerk von OutDir wird geprueft.
+        Das Hochladen macht der Aufrufer (Publish-SmDnsLogs oder der Assistent im Server-Fenster).
+    #>
+    param([AllowEmptyString()][string]$LogPath, [Parameter(Mandatory)][string]$OutDir, [scriptblock]$Progress, [scriptblock]$Log = { param($m) })
+    $full = Test-SmDnsLogPath -Path $LogPath   # Pfad, Endung und Kopfzeile "DNS Server log file creation" wie beim Einschalten
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Keine Logdatei gefunden: $full" }
+    $size = (Get-Item -LiteralPath $full -Force).Length
+    if ($size -eq 0) { throw 'Die Logdatei ist leer.' }
+    $outFull = [IO.Path]::GetFullPath($OutDir)
+    $free = (New-Object IO.DriveInfo ($outFull.Substring(0, 1))).AvailableFreeSpace
+    if ($free -lt ([math]::Min($size, 2GB) / 2 + 50MB)) { throw 'Auf dem Laufwerk ist zu wenig Platz fuer das ZIP.' }
+    & $Log ('Lese Log ({0:N1} MB) und Metadaten' -f ($size / $script:SmDnsBytesPerMB))
+    $meta = Get-SmDnsMeta
+    $zipPath = New-SmDnsLogZip -LogPath $full -OutDir $outFull -Meta $meta -Progress $Progress
+    $len = (Get-Item -LiteralPath $zipPath).Length
+    & $Log ('ZIP gepackt: {0:N1} MB' -f ($len / $script:SmDnsBytesPerMB))
+    [pscustomobject]@{ Path = $zipPath; Name = (Split-Path -Leaf $zipPath); Length = $len }
+}
+
 function Publish-SmDnsLogs {
     <#
     .SYNOPSIS
         Packt die DNS-Logdatei mit Metadaten als ZIP und legt sie per Upload in Teilen im Tauschordner ab.
     .DESCRIPTION
         Arbeitet in einem neuen Zufallsordner unter %TEMP% und raeumt ihn danach auf (nur dieser Ordner, Pfad per GetFullPath geprueft).
-        Progress bekommt (gesendete Bytes, Gesamtbytes) fuer den Upload, Log eine Textzeile.
+        Das Packen steckt in New-SmDnsLogPackage. Progress bekommt (gesendete Bytes, Gesamtbytes) fuer den Upload, Log eine Textzeile.
     #>
-    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$LogPath, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP)
-    $full = Test-SmDnsLogPath -Path $LogPath   # Pfad, Endung und Kopfzeile "DNS Server log file creation" wie beim Einschalten
-    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Keine Logdatei gefunden: $full" }
-    $size = (Get-Item -LiteralPath $full -Force).Length
-    if ($size -eq 0) { throw 'Die Logdatei ist leer.' }
+    param([Parameter(Mandatory)]$Share, [AllowEmptyString()][string]$LogPath, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP)
     $tempFull = [IO.Path]::GetFullPath($TempRoot)
-    $free = (New-Object IO.DriveInfo ($tempFull.Substring(0, 1))).AvailableFreeSpace
-    if ($free -lt ([math]::Min($size, 2GB) / 2 + 50MB)) { throw 'Im Temp-Ordner ist zu wenig Platz fuer das ZIP.' }
     $work = Join-Path $tempFull ('ServerMigration-dns-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $work)
     try {
-        & $Log ('Lese Log ({0:N1} MB) und Metadaten' -f ($size / 1MB))
-        $meta = Get-SmDnsMeta
-        $zipPath = New-SmDnsLogZip -LogPath $full -OutDir $work -Meta $meta
-        & $Log ('ZIP gepackt: {0:N1} MB' -f ((Get-Item -LiteralPath $zipPath).Length / 1MB))
-        $remote = Send-SmShareFile -Share $Share -Path $zipPath -Progress $Progress
-        & $Log ('Im Tauschordner: {0} ({1:N1} MB)' -f $remote.Name, ($remote.Length / 1MB))
+        $pkg = New-SmDnsLogPackage -LogPath $LogPath -OutDir $work -Log $Log
+        $remote = Send-SmShareFile -Share $Share -Path $pkg.Path -Progress $Progress
+        & $Log ('Im Tauschordner: {0} ({1:N1} MB)' -f $remote.Name, ($remote.Length / $script:SmDnsBytesPerMB))
         $remote
     }
     finally {
@@ -425,7 +447,6 @@ function Publish-SmDnsLogs {
         if ($wf.StartsWith($tempFull.TrimEnd('\') + '\ServerMigration-dns-', [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $wf -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
-
 function Register-SmDnsServerPage {
     <#
     .SYNOPSIS
@@ -512,10 +533,11 @@ function Update-SmDnsServerPage {
             }
             $s = $result[-1]; $c2.Status = $s
             $u2.TxtDnsState.Text = if ($s.LoggingOn) { 'Logging ist EIN' } else { 'Logging ist AUS' }
-            $u2.TxtDnsDetail.Text = 'Datei: {0}, max. {1} MB{2}' -f $s.Path, $s.MaxMB, $(if ($s.Packets.Count) { ', Pakete: ' + ($s.Packets -join ', ') } else { '' })
+            $u2.TxtDnsDetail.Text = 'Datei: {0}{3}, max. {1} MB{2}' -f $s.Path, $s.MaxMB, $(if ($s.Packets.Count) { ', Pakete: ' + ($s.Packets -join ', ') } else { '' }), $(if ($s.PathIsDefault) { ' (Windows-Standard, der Pfad ist nicht gesetzt)' } else { '' })
             $u2.BoxDnsEnable.Visibility = if ($s.LoggingOn) { 'Collapsed' } else { 'Visible' }
             $u2.BoxDnsOn.Visibility = if ($s.LoggingOn) { 'Visible' } else { 'Collapsed' }
-            $u2.BoxDnsLogs.Visibility = if ($s.LogExists) { 'Visible' } else { 'Collapsed' }
-            $u2.TxtDnsLogInfo.Text = if ($s.LogExists) { 'Logdatei vorhanden: {0} ({1})' -f $s.FullPath, (Format-SmSize $s.LogBytes) } else { '' }
+            $u2.BoxDnsLogs.Visibility = if ($s.LogExists -or $s.LoggingOn) { 'Visible' } else { 'Collapsed' }
+            $u2.BtnDnsUpload.IsEnabled = [bool]$s.LogExists
+            $u2.TxtDnsLogInfo.Text = if ($s.LogExists) { 'Logdatei vorhanden: {0} ({1})' -f $s.FullPath, (Format-SmSize $s.LogBytes) } elseif ($s.LoggingOn) { 'Das Logging ist an, aber unter {0} gibt es noch keine Logdatei.' -f $s.FullPath } else { '' }
         })
 }

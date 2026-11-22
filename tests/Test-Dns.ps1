@@ -538,8 +538,25 @@ function Get-ADDomainController { [CmdletBinding()]param([string]$Filter) [pscus
 $st = Get-SmDnsStatus
 $good = Join-Path $dnsDir 'dns.log'
 Check 'Status: Logging aus, Pfad, Pakete (nur die eingeschalteten, Update heisst im Set-Namen Updates)' (-not $st.LoggingOn -and $st.Path -eq $good -and ($st.Packets -join ',') -eq 'Answers,TcpPackets' -and -not $st.LogExists)
-Check 'Status: MaxMBFileSize steht in Byte, die Anzeige rechnet in MB (500000000 Byte = 476,8 MB)' ($st.MaxMB -eq 476.8)
-Check 'Groesse: MB nach Byte (500 MB = 524288000), Grenzen unter 4 GB (uint32)' ((ConvertTo-SmDnsMaxBytes -MB 500) -eq 524288000 -and (ConvertTo-SmDnsMaxBytes -MB 2048) -eq 2147483648 -and (ConvertTo-SmDnsMaxBytes -MB 4095) -eq 4293918720 -and (Throws { ConvertTo-SmDnsMaxBytes -MB 4096 }) -and (Throws { ConvertTo-SmDnsMaxBytes -MB 0 }) -and (ConvertTo-SmDnsMaxBytes -MB 500).GetType().Name -eq 'UInt32')
+Check 'Status: MaxMBFileSize steht in Byte, die Anzeige rechnet in dezimalen MB (500000000 Byte = 500 MB, nicht 476,8)' ($st.MaxMB -eq 500 -and (ConvertFrom-SmDnsMaxBytes 500000000) -eq 500 -and (ConvertFrom-SmDnsMaxBytes 1500000) -eq 1.5)
+Check 'Groesse: dezimale MB nach Byte (500 MB = 500000000, 1 MB = 1000000), Grenzen unter 4294 MB (uint32)' ((ConvertTo-SmDnsMaxBytes -MB 500) -eq 500000000 -and (ConvertTo-SmDnsMaxBytes -MB 1) -eq 1000000 -and (ConvertTo-SmDnsMaxBytes -MB 2048) -eq 2048000000 -and (ConvertTo-SmDnsMaxBytes -MB 4294) -eq 4294000000 -and (Throws { ConvertTo-SmDnsMaxBytes -MB 4295 }) -and (Throws { ConvertTo-SmDnsMaxBytes -MB 0 }) -and (ConvertTo-SmDnsMaxBytes -MB 500).GetType().Name -eq 'UInt32')
+# Leerer LogFilePath bei aktivem Logging (Get-DnsServerDiagnostics liefert ihn nicht): Windows schreibt nach %windir%\System32\dns\dns.log (Fehler "Datei: , max. 476,8 MB", Karte zum Sammeln fehlte)
+[IO.File]::WriteAllText($good, "DNS Server log file creation at 22.11.2026 10:00:00`r`n", [Text.Encoding]::ASCII)
+$keepDiag = $script:Diag.PSObject.Copy(); $keepDefault = $script:SmDnsDefaultPath
+$script:Diag.EnableLoggingToFile = $true; $script:Diag.LogFilePath = ''
+$script:SmDnsDefaultPath = $good
+$stE = Get-SmDnsStatus
+Check 'Status: leerer LogFilePath bei aktivem Logging gilt als Windows-Standard (Pfad angezeigt, vollstaendiger Pfad, Datei gefunden, an)' ($stE.LoggingOn -and $stE.PathIsDefault -and $stE.Path -eq $good -and $stE.FullPath -eq $good -and $stE.LogExists -and $stE.LogBytes -gt 0 -and $stE.MaxMB -eq 500)
+Check 'Pfad: leer, nur Leerraum und $null werfen nicht, sondern gelten als Standard' ((Test-SmDnsLogPath -Path '') -eq [IO.Path]::GetFullPath($good) -and (Test-SmDnsLogPath -Path '   ') -eq [IO.Path]::GetFullPath($good) -and (Test-SmDnsLogPath -Path $null) -eq [IO.Path]::GetFullPath($good))
+$script:SmDnsDefaultPath = $keepDefault
+$script:Diag.LogFilePath = [string]$keepDiag.LogFilePath; $script:Diag.EnableLoggingToFile = $false
+Remove-Item -LiteralPath $good -Force
+$script:SmDnsAllowedDirOverride = $null
+Check 'Pfad: leerer Pfad ohne Ersatz = der Standard %windir%\System32\dns\dns.log (gleiche Pruefung, gleiche Meldung)' ($(
+        $a = try { Test-SmDnsLogPath -Path '' } catch { $_.Exception.Message }
+        $b = try { Test-SmDnsLogPath -Path $script:SmDnsDefaultPath } catch { $_.Exception.Message }
+        $a -eq $b))
+$script:SmDnsAllowedDirOverride = $dnsDir
 # Pfad
 Check 'Pfad: gueltiger Pfad (Kurznamen werden aufgeloest)' ((Test-SmDnsLogPath -Path $good) -eq [IO.Path]::GetFullPath($good))
 $script:SmDnsAllowedDirOverride = $null
@@ -567,8 +584,8 @@ $script:IsAdmin = $true
 $logLines = New-Object System.Collections.Generic.List[string]
 Enable-SmDnsLogging -Plan $plan -StateDir $stateDir -Log { param($m) $logLines.Add($m) }
 $call = $script:SetCalls[0]
-Check 'Einschalten: Set-DnsServerDiagnostics mit Pfad, Groesse in BYTE (500 MB = 524288000) und allen Paketen' ($call.EnableLoggingToFile -eq $true -and $call.LogFilePath -eq [IO.Path]::GetFullPath($good) -and $call.MaxMBFileSize -eq 524288000 -and $call.Queries -and $call.Answers -and $call.SendPackets -and $call.ReceivePackets -and $call.UdpPackets -and $call.TcpPackets -and $call.Notifications -and $call.Updates)
-Check 'Einschalten: der Parameter heisst Updates (nicht Update) und kommt wirklich an (Mock mit der Parameterliste der Doku)' (-not $call.ContainsKey('Update') -and $script:Diag.Update -eq $true -and $script:Diag.MaxMBFileSize -eq 524288000)
+Check 'Einschalten: Set-DnsServerDiagnostics mit Pfad, Groesse in BYTE (500 MB = 500000000) und allen Paketen' ($call.EnableLoggingToFile -eq $true -and $call.LogFilePath -eq [IO.Path]::GetFullPath($good) -and $call.MaxMBFileSize -eq 500000000 -and $call.Queries -and $call.Answers -and $call.SendPackets -and $call.ReceivePackets -and $call.UdpPackets -and $call.TcpPackets -and $call.Notifications -and $call.Updates)
+Check 'Einschalten: der Parameter heisst Updates (nicht Update) und kommt wirklich an (Mock mit der Parameterliste der Doku)' (-not $call.ContainsKey('Update') -and $script:Diag.Update -eq $true -and $script:Diag.MaxMBFileSize -eq 500000000)
 Check 'Einschalten: Protokollzeile ohne Geheimnisse (Pfad, Groesse, Pakete)' (($logLines -join '|') -match 'DNS-Logging eingeschaltet' -and ($logLines -join '|') -match '500 MB' -and ($logLines -join '|') -notmatch '(?i)passw|kennwort|http|token')
 $stateFile = Join-Path $stateDir 'dns-diagnostics-before.json'
 $sv = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json

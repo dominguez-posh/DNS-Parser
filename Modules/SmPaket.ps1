@@ -15,7 +15,8 @@ $script:SmServerFiles = @(
     'server/Start-SmServer.ps1', 'Modules/SmTheme.ps1', 'Modules/SmShell.ps1', 'Modules/SmUi.ps1', 'Modules/SmTausch.ps1',
     'server/SmDnsServer.ps1', 'Modules/SmDhcp.ps1', 'server/SmDhcpServer.ps1', 'UI/Theme.xaml', 'UI/Shell.xaml', 'UI/DnsServer.xaml', 'UI/DhcpServer.xaml',
     'Modules/SmPrint.ps1', 'server/SmPrintServer.ps1', 'UI/PrintServer.xaml',
-    'Modules/SmAd.ps1', 'server/SmAdServer.ps1', 'UI/AdServer.xaml'
+    'Modules/SmAd.ps1', 'server/SmAdServer.ps1', 'UI/AdServer.xaml',
+    'server/SmAssistent.ps1', 'UI/ServerStart.xaml'
 )
 
 function Test-SmShareLink {

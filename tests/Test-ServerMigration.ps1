@@ -278,6 +278,12 @@ try {
     $odd = Join-Path $work 'mit leerzeichen.txt'; [IO.File]::WriteAllText($odd, 'x')
     Check 'Dateiname mit Leerzeichen abgelehnt' (Throws { Send-SmShareFile -Share $share -Path $odd })
 
+    # Assistent im Server-Fenster: Hochladen mehrerer vorgemerkter Dateien gegen denselben nachgebauten SharePoint
+    Write-Host ''
+    Write-Host '--- Assistent (tests\Test-Assistent.ps1)'
+    $script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Assistent.ps1') -Repo $repo -Work $work -Share $share -Store $store)[-1])
+    Write-Host ''
+
     # ------------------------------------------------------------ Berater legt das Paket selbst ab, Einzeiler startet das Server-Fenster
     $pub = Publish-SmServerPackage -Share $share -RepoRoot $repo -OutDir (Join-Path $work 'pub') -AnyHost
     Check 'Paket im Tauschordner, Groesse stimmt' ($pub.Remote.Name -eq 'SM-Server-Paket.zip' -and $pub.Remote.Length -eq $pub.Package.Length)
