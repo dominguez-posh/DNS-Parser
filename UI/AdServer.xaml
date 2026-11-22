@@ -51,6 +51,7 @@
                             <ComboBox x:Name="CmbAdSeizeRole" MinWidth="200" Margin="0,0,8,0" AutomationProperties.Name="Rolle für Seize"/>
                             <Button x:Name="BtnAdSeizeCheck" Content="Inhaber prüfen"/>
                         </StackPanel>
+                        <CheckBox x:Name="ChkAdSeizeGone" Content="Der alte Inhaber ist dauerhaft entfernt und kommt nie wieder ans Netz" Margin="0,10,0,0" AutomationProperties.Name="Der alte Inhaber ist dauerhaft entfernt"/>
                         <TextBlock Text="Zur Bestätigung den Rollennamen genau so tippen" Style="{DynamicResource SmallLabel}" Margin="0,8,0,2"/>
                         <TextBox x:Name="TxtAdSeizeConfirm" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" AutomationProperties.Name="Rollenname zur Bestätigung"/>
                         <Button x:Name="BtnAdSeize" Content="Rolle übernehmen (Seize) …" Style="{DynamicResource DangerGhost}" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
@@ -62,11 +63,11 @@
         <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
             <StackPanel>
                 <TextBlock Text="3  DSRM-Kennwort" Style="{DynamicResource CardTitle}"/>
-                <RadioButton x:Name="RbAdDsrmSync" Content="Mit Domänenkonto synchronisieren (empfohlen, das Tool berührt kein Kennwort)" GroupName="Dsrm" Margin="0,8,0,0"/>
+                <RadioButton x:Name="RbAdDsrmSync" Content="Mit Domänenkonto synchronisieren (empfohlen, das Tool berührt kein Kennwort; am besten ein eigenes, deaktiviertes Konto)" GroupName="Dsrm" Margin="0,8,0,0"/>
                 <TextBlock Text="Domänenkonto (nur dieser Server, einmalig)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
                 <TextBox x:Name="TxtAdDsrmAccount" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänenkonto für die Synchronisierung"/>
                 <RadioButton x:Name="RbAdDsrmPwd" Content="Neues Kennwort setzen" GroupName="Dsrm" Margin="0,14,0,0"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="22,4,0,4" TextWrapping="Wrap" Text="Das Kennwort geht nur über die Standardeingabe an ntdsutil und wird nirgends gespeichert, protokolliert oder hochgeladen. Mindestens 12 Zeichen, drei von vier Zeichenarten."/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="22,4,0,4" TextWrapping="Wrap" Text="Das Kennwort geht nur über die Standardeingabe an ntdsutil und wird nirgends gespeichert, protokolliert oder hochgeladen. Mindestens 12 Zeichen, drei von vier Zeichenarten. Variante B muss im Labor geprüft werden: Nimmt ntdsutil das Kennwort nicht an, bitte die Variante Synchronisieren nutzen."/>
                 <TextBlock Text="Domänencontroller (leer = dieser Server)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
                 <TextBox x:Name="TxtAdDsrmDc" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänencontroller für das DSRM-Kennwort"/>
                 <TextBlock Text="Neues Kennwort" Style="{DynamicResource SmallLabel}" Margin="22,8,0,2"/>
@@ -98,10 +99,10 @@
             <StackPanel>
                 <TextBlock Text="5  Schema-Update (adprep)" Style="{DynamicResource CardTitle}"/>
                 <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Nur nötig, wenn das Schema vorab erweitert werden soll. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch. /forestprep läuft auf dem Schemamaster, /domainprep auf dem Infrastrukturmaster. Vorher eine Systemstatus-Sicherung anlegen."/>
-                <TextBlock Text="Installationsmedium (Ordner mit support\adprep\adprep.exe)" Style="{DynamicResource SmallLabel}"/>
+                <TextBlock Text="Installationsmedium (eingebundenes ISO oder DVD, Laufwerk mit support\adprep\adprep.exe). Nur ein originales Microsoft-ISO verwenden." Style="{DynamicResource SmallLabel}"/>
                 <StackPanel Orientation="Horizontal">
                     <TextBox x:Name="TxtAdMedia" Padding="8,6" Width="420" Margin="0,0,8,0" AutomationProperties.Name="Pfad zum Installationsmedium"/>
-                    <Button x:Name="BtnAdMediaBrowse" Content="Wählen …"/>
+                    <Button x:Name="BtnAdMediaBrowse" Content="Laufwerk suchen"/>
                 </StackPanel>
                 <WrapPanel Margin="0,10,0,0">
                     <Button x:Name="BtnAdForestCheck" Content="/forestprep prüfen" Margin="0,0,8,4"/>

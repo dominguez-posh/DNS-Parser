@@ -20,6 +20,8 @@ $script:SmAdDcdiagTests = @('KnowsOfRoleHolders', 'Advertising', 'Replications',
 $script:SmAdRoles = @('PDCEmulator', 'RIDMaster', 'InfrastructureMaster', 'SchemaMaster', 'DomainNamingMaster')
 $script:SmAdToolTimeoutSec = 600
 $script:SmAdAdprepTimeoutSec = 3600
+$script:SmAdNtdsutilTimeoutSec = 60          # ntdsutil ohne Konsole kann haengen: kurzer Timeout
+$script:SmAdSeizeProbeIntervalSec = 10       # Abstand der drei Erreichbarkeitspruefungen vor Seize
 
 # ---------------------------------------------------------------- Grundlagen
 
@@ -122,7 +124,7 @@ function Invoke-SmAdProcess {
             $bstr = [IntPtr]::Zero; $chars = $null
             try {
                 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
-                $chars = New-Object char[] $Secret.Length
+                $chars = [char[]]::new($Secret.Length)
                 [Runtime.InteropServices.Marshal]::Copy($bstr, $chars, 0, $chars.Length)
                 for ($i = 0; $i -lt $SecretRepeat; $i++) { $p.StandardInput.Write($chars, 0, $chars.Length); $p.StandardInput.WriteLine() }
             }
@@ -299,6 +301,64 @@ function Test-SmAdHostReachable {
     $false
 }
 
+function Test-SmAdPing {
+    param([Parameter(Mandatory)][string]$HostName)
+    try { [bool](Test-Connection -ComputerName $HostName -Count 1 -Quiet -ErrorAction Stop) } catch { $false }
+}
+
+function Test-SmAdTcpPort {
+    param([Parameter(Mandatory)][string]$HostName, [Parameter(Mandatory)][int]$Port, [int]$TimeoutMs = 3000)
+    $tcp = New-Object Net.Sockets.TcpClient
+    try {
+        $iar = $tcp.BeginConnect($HostName, $Port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs) -and $tcp.Connected) { $tcp.EndConnect($iar); return $true }
+    }
+    catch { }
+    finally { $tcp.Close() }
+    $false
+}
+
+function Test-SmAdHolderProbe {
+    <# Prueft den Inhaber mehrfach im Abstand von IntervalSec: Ping, LDAP (389) und RPC-Endpunktzuordnung (135). Antwortet auch nur eines davon
+       einmal, gilt er als erreichbar. #>
+    param([Parameter(Mandatory)][string]$HostName, [int]$Attempts = 3, [int]$IntervalSec = $script:SmAdSeizeProbeIntervalSec)
+    if ($HostName -notmatch '^[A-Za-z0-9.\-]{1,255}$') { throw "Ungueltiger Servername: $HostName" }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    for ($i = 1; $i -le $Attempts; $i++) {
+        if ($i -gt 1 -and $IntervalSec -gt 0) { Start-Sleep -Seconds $IntervalSec }
+        $rows.Add([pscustomobject]@{ Attempt = $i; Ping = (Test-SmAdPing -HostName $HostName); Ldap = (Test-SmAdTcpPort -HostName $HostName -Port 389); Rpc = (Test-SmAdTcpPort -HostName $HostName -Port 135) })
+    }
+    $any = $false; foreach ($r in $rows) { if ($r.Ping -or $r.Ldap -or $r.Rpc) { $any = $true } }
+    $text = (@($rows.ToArray() | ForEach-Object { 'Versuch {0}: Ping {1}, LDAP 389 {2}, RPC 135 {3}' -f $_.Attempt, $(if ($_.Ping) { 'ja' } else { 'nein' }), $(if ($_.Ldap) { 'ja' } else { 'nein' }), $(if ($_.Rpc) { 'ja' } else { 'nein' }) })) -join '; '
+    [pscustomobject]@{ Reachable = $any; Rows = $rows.ToArray(); Text = $text }
+}
+
+function Get-SmAdLastReplication {
+    <# Letzte erfolgreiche Replikation eines Servers laut repadmin /showrepl * /csv (als Quelle oder Ziel). Text, oder "nicht ermittelbar". #>
+    param([Parameter(Mandatory)][string]$HostName)
+    try {
+        $short = ($HostName -split '\.')[0]
+        $c = Invoke-SmAdProcess -FilePath (Get-SmAdToolPath 'repadmin') -Arguments '/showrepl * /csv'
+        $hdr = @($c.Lines | Where-Object { $_ -match 'Last Success Time' } | Select-Object -First 1)
+        if (-not $hdr.Count) { return 'nicht ermittelbar' }
+        $names = @($hdr[0] -split ',' | ForEach-Object { $_.Trim('"') })
+        $ti = [array]::IndexOf($names, 'Last Success Time'); $si = [array]::IndexOf($names, 'Source DSA'); $di = [array]::IndexOf($names, 'Destination DSA')
+        $best = $null
+        foreach ($line in ($c.Lines | Where-Object { $_ -notmatch 'Last Success Time' })) {
+            $f = @(([regex]'("([^"]*)"|[^,]*)(,|$)').Matches($line) | ForEach-Object { $_.Groups[1].Value.Trim('"') })
+            if ($ti -lt 0 -or $f.Count -le $ti) { continue }
+            $src = if ($si -ge 0 -and $f.Count -gt $si) { ($f[$si] -split '[\\.]')[-1] } else { '' }
+            $dst = if ($di -ge 0 -and $f.Count -gt $di) { ($f[$di] -split '[\\.]')[-1] } else { '' }
+            if ($src -ine $short -and $dst -ine $short) { continue }
+            $d = [datetime]::MinValue
+            if ([datetime]::TryParse($f[$ti], [ref]$d) -and (-not $best -or $d -gt $best)) { $best = $d }
+        }
+        if ($best) { return ('{0:yyyy-MM-dd HH:mm}' -f $best) }
+    }
+    catch { }
+    'nicht ermittelbar'
+}
+
 # ---------------------------------------------------------------- FSMO
 
 function Test-SmAdFsmoPrecheck {
@@ -353,17 +413,21 @@ function Invoke-SmAdFsmoTransfer {
 }
 
 function Invoke-SmAdFsmoSeize {
-    <# Seize einer einzelnen Rolle. Nur wenn der Inhaber nicht erreichbar ist und der Rollenname getippt wurde. #>
-    param([Parameter(Mandatory)][string]$Role, [string]$TypedRole, [switch]$Confirmed)
+    <# Seize einer einzelnen Rolle. Nur wenn der Inhaber nicht erreichbar ist (3 Pruefungen im Abstand von 10 s: Ping, LDAP, RPC), der Rollenname getippt
+       wurde und -OwnerPermanentlyRemoved gesetzt ist (die Oberflaeche setzt es nur nach dem Haken "alter Inhaber dauerhaft entfernt"). #>
+    param([Parameter(Mandatory)][string]$Role, [string]$TypedRole, [switch]$Confirmed, [switch]$OwnerPermanentlyRemoved)
     Invoke-SmAdAudited -What 'FSMO Seize' -Subject ($Role + ' -> ' + $env:COMPUTERNAME) -Body {
         if ($script:SmAdRoles -cnotcontains $Role) { throw "Unbekannte Rolle: $Role" }
         if (-not $Confirmed) { throw 'Nicht bestaetigt, nichts geaendert.' }
         if ($TypedRole -cne $Role) { throw 'Der getippte Rollenname stimmt nicht, nichts geaendert.' }
+        if (-not $OwnerPermanentlyRemoved) { throw 'Es fehlt die Bestaetigung, dass der alte Inhaber dauerhaft entfernt ist und nie wieder ans Netz kommt, nichts geaendert.' }
         if (-not (Test-SmAdIsAdmin)) { throw 'Das Fenster laeuft nicht als Administrator.' }
         Assert-SmAdModule
         $m = Get-SmAdFsmoMap; $holder = $m.Map[$Role]
         if (Test-SmAdIsLocalHost $holder) { throw "$Role liegt schon auf diesem Server." }
-        if (Test-SmAdHostReachable -HostName $holder) { throw "Der Inhaber $holder ist erreichbar. Seize ist dafuer nicht erlaubt: bitte normal uebertragen." }
+        $probe = Test-SmAdHolderProbe -HostName $holder
+        if ($probe.Reachable) { throw ("Der Inhaber $holder ist erreichbar ($($probe.Text)). Seize ist dafuer nicht erlaubt: bitte normal uebertragen.") }
+        $lastRepl = Get-SmAdLastReplication -HostName $holder
         $local = Get-ADDomainController -Identity $env:COMPUTERNAME
         if ($local.IsReadOnly) { throw 'Dieser Server ist ein RODC.' }
         $need = @('DomainAdmins'); if ($Role -eq 'SchemaMaster') { $need += 'SchemaAdmins' }; if ($Role -eq 'DomainNamingMaster') { $need += 'EnterpriseAdmins' }
@@ -372,32 +436,42 @@ function Invoke-SmAdFsmoSeize {
         Move-ADDirectoryServerOperationMasterRole -Identity $local -OperationMasterRole $Role -Force -Confirm:$false
         $after = (Get-SmAdFsmoMap).Map
         if (-not (Test-SmAdIsLocalHost $after[$Role])) { throw "Nachpruefung: $Role liegt nicht auf diesem Server." }
-        [pscustomobject]@{ Before = $holder; Detail = "uebernommen von $holder (nicht erreichbar); der alte Server darf nie wieder ans Netz" }
+        [pscustomobject]@{ Before = $holder; LastReplication = $lastRepl; Probe = $probe.Text; Detail = "uebernommen von $holder (3 Pruefungen ohne Antwort, letzte erfolgreiche Replikation: $lastRepl); der alte Server darf nie wieder ans Netz" }
     }
 }
 
 # ---------------------------------------------------------------- DSRM
 
 function Test-SmAdPasswordComplexity {
-    <# Laenge mindestens 12 und mindestens drei von vier Zeichenarten. Arbeitet auf einem Zeichenfeld, das danach geloescht wird. #>
+    <# Laenge mindestens 12 und mindestens drei von vier Zeichenarten. Arbeitet nur auf einem Zeichenfeld (eine for-Schleife, keine Pipeline, kein Cmdlet,
+       kein Mustervergleich auf Klartext), das danach geloescht wird. Es entsteht nie ein Klartext-String. #>
     param([Parameter(Mandatory)][securestring]$Password)
-    $problems = New-Object System.Collections.Generic.List[string]
+    $problems = [System.Collections.Generic.List[string]]::new()
     $bstr = [IntPtr]::Zero; $chars = $null
     try {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
-        $chars = New-Object char[] $Password.Length
+        $chars = [char[]]::new($Password.Length)
         [Runtime.InteropServices.Marshal]::Copy($bstr, $chars, 0, $chars.Length)
+        $upper = $false; $lower = $false; $digit = $false; $other = $false; $quote = $false
+        for ($i = 0; $i -lt $chars.Length; $i++) {
+            $ch = $chars[$i]
+            if ([char]::IsUpper($ch)) { $upper = $true }
+            elseif ([char]::IsLower($ch)) { $lower = $true }
+            elseif ([char]::IsDigit($ch)) { $digit = $true }
+            else { $other = $true }
+            if ($ch -eq [char]34 -or $ch -eq [char]39 -or $ch -eq [char]0) { $quote = $true }
+        }
         if ($chars.Length -lt 12) { $problems.Add('mindestens 12 Zeichen') }
         $kinds = 0
-        if ($chars | Where-Object { [char]::IsUpper($_) } | Select-Object -First 1) { $kinds++ }
-        if ($chars | Where-Object { [char]::IsLower($_) } | Select-Object -First 1) { $kinds++ }
-        if ($chars | Where-Object { [char]::IsDigit($_) } | Select-Object -First 1) { $kinds++ }
-        if ($chars | Where-Object { -not [char]::IsLetterOrDigit($_) } | Select-Object -First 1) { $kinds++ }
+        if ($upper) { $kinds++ }
+        if ($lower) { $kinds++ }
+        if ($digit) { $kinds++ }
+        if ($other) { $kinds++ }
         if ($kinds -lt 3) { $problems.Add('mindestens drei von: Grossbuchstaben, Kleinbuchstaben, Ziffern, Sonderzeichen') }
-        if ($chars | Where-Object { $_ -in [char]'"', [char]"'", [char]0 } | Select-Object -First 1) { $problems.Add('keine Anfuehrungszeichen (ntdsutil verarbeitet sie nicht richtig)') }
+        if ($quote) { $problems.Add('keine Anfuehrungszeichen (ntdsutil verarbeitet sie nicht richtig)') }
     }
     finally { if ($chars) { [Array]::Clear($chars, 0, $chars.Length) }; if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
-    [pscustomobject]@{ Ok = (-not $problems.Count); Problems = $problems.ToArray() }
+    [pscustomobject]@{ Ok = ($problems.Count -eq 0); Problems = $problems.ToArray() }
 }
 
 function Test-SmAdSecureEqual {
@@ -406,7 +480,7 @@ function Test-SmAdSecureEqual {
     $ba = [IntPtr]::Zero; $bb = [IntPtr]::Zero; $ca = $null; $cb = $null
     try {
         $ba = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($A); $bb = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($B)
-        $ca = New-Object char[] $A.Length; $cb = New-Object char[] $B.Length
+        $ca = [char[]]::new($A.Length); $cb = [char[]]::new($B.Length)
         [Runtime.InteropServices.Marshal]::Copy($ba, $ca, 0, $ca.Length); [Runtime.InteropServices.Marshal]::Copy($bb, $cb, 0, $cb.Length)
         $diff = 0; for ($i = 0; $i -lt $ca.Length; $i++) { $diff = $diff -bor ([int]$ca[$i] -bxor [int]$cb[$i]) }
         $diff -eq 0
@@ -417,8 +491,78 @@ function Test-SmAdSecureEqual {
     }
 }
 
+function Test-SmAdSecretInText {
+    <# Kommt das Geheimnis (SecureString) in Text vor? Vergleich Zeichen fuer Zeichen auf Zeichenfeldern, ohne Klartext-String und ohne Cmdlet. #>
+    param([Parameter(Mandatory)][securestring]$Secret, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    if ($Secret.Length -eq 0 -or $Text.Length -lt $Secret.Length) { return $false }
+    $bstr = [IntPtr]::Zero; $chars = $null; $found = $false
+    try {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
+        $chars = [char[]]::new($Secret.Length)
+        [Runtime.InteropServices.Marshal]::Copy($bstr, $chars, 0, $chars.Length)
+        for ($s = 0; $s -le $Text.Length - $chars.Length -and -not $found; $s++) {
+            $k = 0
+            while ($k -lt $chars.Length -and $Text[$s + $k] -ceq $chars[$k]) { $k++ }
+            if ($k -eq $chars.Length) { $found = $true }
+        }
+    }
+    finally { if ($chars) { [Array]::Clear($chars, 0, $chars.Length) }; if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
+    $found
+}
+
+function Get-SmAdNtdsutilResult {
+    <#
+    Wertet die Ausgabe von ntdsutil aus. Erfolg nur, wenn die Erfolgsmeldung da ist (der Exitcode allein genuegt nicht: ntdsutil meldet auch bei
+    einem nicht angenommenen Kennwort oft 0). Die Meldung steht nicht in der Microsoft-Doku; sie ist aus der Praxis ("Password has been set successfully.")
+    und die deutsche Entsprechung wird im Labor geprueft. Gezeigt wird nur eine bereinigte Statuszeile: bei Erfolg die erkannte Meldung, sonst nur Zeilen
+    mit Fehlerkennung, ohne Steuerzeichen, gekuerzt und ohne das Kennwort.
+    #>
+    param([Parameter(Mandatory)][int]$ExitCode, [AllowEmptyCollection()][string[]]$Lines = @(), [securestring]$Secret)
+    $ok = '^\s*(Password has been (set|synced|synchronized) successfully\.?|Das Kennwort wurde erfolgreich (festgelegt|synchronisiert)\.?)\s*$'
+    $success = $false
+    foreach ($l in $Lines) { if ($l -match $ok) { $success = $true } }
+    $status = ''
+    if ($success) { $status = 'Erfolgsmeldung von ntdsutil erkannt' }
+    else {
+        foreach ($l in $Lines) {
+            if ($status) { break }
+            if ($l -notmatch '(?i)(error|fehler|failed|fehlgeschlagen|denied|verweigert)|0x[0-9a-f]{4,8}') { continue }
+            if ($Secret -and (Test-SmAdSecretInText -Secret $Secret -Text $l)) { continue }
+            $c = ($l -replace '[^ -~À-ÿ]', '').Trim()
+            if ($c.Length -gt 120) { $c = $c.Substring(0, 120) + '...' }
+            $status = $c
+        }
+    }
+    [pscustomobject]@{ Ok = ($ExitCode -eq 0 -and $success); ExitCode = $ExitCode; SuccessMessage = $success; Status = $status }
+}
+
+function Get-SmAdDsrmAccountWarnings {
+    <# Nur lesend. Warnt, wenn das Konto fuer die Synchronisierung Mitglied privilegierter Gruppen ist oder sich normal anmelden kann.
+       Wer dieses Konto kennt oder missbraucht, kennt damit das DSRM-Kennwort (Anmeldung am DC ohne Domaenenrichtlinien). #>
+    param([Parameter(Mandatory)][string]$Account)
+    if ($Account -notmatch '^[\w.\-]{1,64}(\\[\w.\-]{1,64})?$') { throw 'Kontoname: nur Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich (optional DOMAENE\Konto).' }
+    Assert-SmAdModule
+    $acct = ($Account -split '\\')[-1]
+    $u = Get-ADUser -Identity $acct -Properties Enabled, tokenGroups
+    if (-not $u) { throw 'Das Konto existiert nicht.' }
+    $ctx = Get-SmAdFsmoMap
+    $sids = Get-SmAdGroupSids -Ctx $ctx
+    $priv = [ordered]@{
+        ($sids.DomainAdmins) = 'Domain Admins'; ($sids.EnterpriseAdmins) = 'Enterprise Admins'; ($sids.SchemaAdmins) = 'Schema Admins'
+        'S-1-5-32-544' = 'Administratoren'; 'S-1-5-32-548' = 'Konten-Operatoren'; 'S-1-5-32-549' = 'Server-Operatoren'; 'S-1-5-32-550' = 'Druck-Operatoren'; 'S-1-5-32-551' = 'Sicherungs-Operatoren'
+    }
+    $member = [System.Collections.Generic.List[string]]::new()
+    foreach ($g in @($u.tokenGroups)) { $v = [string]$(if ($g.Value) { $g.Value } else { $g }); if ($priv.Contains($v)) { $member.Add($priv[$v]) } }
+    $w = [System.Collections.Generic.List[string]]::new()
+    if ($member.Count) { $w.Add('ACHTUNG: Das Konto ist Mitglied privilegierter Gruppen (' + ($member -join ', ') + '). Sein Kennwort wuerde dann zugleich das DSRM-Kennwort dieses Servers sein.') }
+    if ([bool]$u.Enabled) { $w.Add('ACHTUNG: Das Konto ist aktiviert und kann sich normal anmelden. Sein Kennwort wuerde dann zugleich das DSRM-Kennwort dieses Servers sein.') }
+    if ($w.Count) { $w.Add('Der Kontoname sollte auf ein eigenes Konto zeigen, das nur dafuer da, deaktiviert und in keiner privilegierten Gruppe ist.') }
+    [pscustomobject]@{ Account = $acct; Enabled = [bool]$u.Enabled; PrivilegedGroups = $member.ToArray(); Warnings = $w.ToArray() }
+}
+
 function Invoke-SmAdDsrmSync {
-    <# Variante A: ntdsutil "set dsrm password" "sync from domain account <konto>" q q. Das Tool beruehrt kein Kennwort. Wirkt nur auf diesen Server (laut Doku). #>
+    <# Variante A: ntdsutil "set dsrm password" "sync from domain account <konto>" q q. Das Tool beruehrt kein Kennwort. Wirkt nur auf diesen Server (laut Doku).
+       Erfolg nur mit Erfolgsmeldung in der Ausgabe, nicht nur am Exitcode. #>
     param([Parameter(Mandatory)][string]$Account, [switch]$Confirmed)
     Invoke-SmAdAudited -What 'DSRM mit Domaenenkonto synchronisieren' -Subject ($env:COMPUTERNAME + ' <- ' + $Account) -Body {
         if (-not $Confirmed) { throw 'Nicht bestaetigt, nichts geaendert.' }
@@ -427,17 +571,18 @@ function Invoke-SmAdDsrmSync {
         Assert-SmAdModule
         $local = Get-ADDomainController -Identity $env:COMPUTERNAME
         if ($local.IsReadOnly) { throw 'Dieser Server ist ein RODC.' }
-        $acct = ($Account -split '\\')[-1]
-        $u = Get-ADUser -Identity $acct
-        if (-not $u -or $u.Enabled -eq $false) { throw 'Das Konto existiert nicht oder ist deaktiviert.' }
-        $r = Invoke-SmAdProcess -FilePath (Get-SmAdToolPath 'ntdsutil') -Arguments ('"set dsrm password" "sync from domain account {0}" q q' -f $Account)
-        if ($r.ExitCode -ne 0) { throw ('ntdsutil meldete einen Fehler (Exitcode {0}): {1}' -f $r.ExitCode, (($r.Lines | Select-Object -First 3) -join ' | ')) }
-        [pscustomobject]@{ Detail = 'ntdsutil ohne Fehler (Exitcode 0), Kennwort wurde nicht angefasst'; Lines = $r.Lines }
+        $info = Get-SmAdDsrmAccountWarnings -Account $Account
+        $r = Invoke-SmAdProcess -FilePath (Get-SmAdToolPath 'ntdsutil') -Arguments ('"set dsrm password" "sync from domain account {0}" q q' -f $Account) -TimeoutSec $script:SmAdNtdsutilTimeoutSec
+        $res = Get-SmAdNtdsutilResult -ExitCode $r.ExitCode -Lines $r.Lines
+        if (-not $res.Ok) { throw ('ntdsutil hat die Synchronisierung nicht bestaetigt (Exitcode {0}, {1}). Status: {2}' -f $res.ExitCode, $(if ($res.SuccessMessage) { 'Erfolgsmeldung vorhanden' } else { 'keine Erfolgsmeldung' }), $res.Status) }
+        $warn = if ($info.Warnings.Count) { ' | WARNUNG: ' + (($info.Warnings | Select-Object -First 1)) } else { '' }
+        [pscustomobject]@{ Detail = ('ntdsutil: Erfolgsmeldung erkannt, Kennwort wurde nicht angefasst' + $warn); Warnings = $info.Warnings; Lines = @($res.Status) }
     }
 }
 
 function Invoke-SmAdDsrmReset {
-    <# Variante B: neues Kennwort. Dc: NULL oder leer = dieser Server, sonst Name des DC ("reset password on server <DC>"). Kennwort nur ueber die Standardeingabe. #>
+    <# Variante B: neues Kennwort. Dc: NULL oder leer = dieser Server, sonst Name des DC ("reset password on server <DC>"). Kennwort nur ueber die Standardeingabe.
+       Erfolg nur mit Erfolgsmeldung. Haengt ntdsutil (keine Konsole), wird es nach kurzer Zeit beendet. Variante B ist im Labor zu pruefen. #>
     param([Parameter(Mandatory)][securestring]$Password, [Parameter(Mandatory)][securestring]$Confirm, [string]$Dc = '', [switch]$Confirmed)
     $dcName = if (-not $Dc -or $Dc -ieq 'NULL' -or (Test-SmAdIsLocalHost $Dc)) { 'NULL' } else { $Dc }
     Invoke-SmAdAudited -What 'DSRM-Kennwort setzen' -Subject ($env:COMPUTERNAME + ' -> ' + $(if ($dcName -eq 'NULL') { $env:COMPUTERNAME } else { $dcName })) -Body {
@@ -448,10 +593,14 @@ function Invoke-SmAdDsrmReset {
         $cx = Test-SmAdPasswordComplexity $Password
         if (-not $cx.Ok) { throw ('Das Kennwort ist nicht komplex genug: ' + ($cx.Problems -join '; ')) }
         if ($dcName -ne 'NULL' -and -not (Test-SmAdHostReachable -HostName $dcName)) { throw "Der DC $dcName ist nicht erreichbar." }
-        $r = Invoke-SmAdProcess -FilePath (Get-SmAdToolPath 'ntdsutil') -Arguments ('"set dsrm password" "reset password on server {0}" q q' -f $dcName) -Secret $Password -SecretRepeat 2
-        # Die Ausgabe wird nie angezeigt oder protokolliert (sie koennte das Kennwort wiedergeben).
-        if ($r.ExitCode -ne 0) { throw ('ntdsutil meldete einen Fehler (Exitcode {0}). Die Ausgabe wird aus Sicherheitsgruenden nicht angezeigt.' -f $r.ExitCode) }
-        [pscustomobject]@{ Detail = 'ntdsutil ohne Fehler (Exitcode 0); Kennwort nicht protokolliert' }
+        $timedOut = $false; $r = $null
+        try { $r = Invoke-SmAdProcess -FilePath (Get-SmAdToolPath 'ntdsutil') -Arguments ('"set dsrm password" "reset password on server {0}" q q' -f $dcName) -Secret $Password -SecretRepeat 2 -TimeoutSec $script:SmAdNtdsutilTimeoutSec }
+        catch { if ($_.Exception.Message -like 'Zeitueberschreitung*') { $timedOut = $true } else { throw } }
+        if ($timedOut) { throw 'ntdsutil nimmt das Kennwort hier nicht an – bitte die Variante Synchronisieren nutzen. (ntdsutil antwortete nicht und wurde beendet; Variante B ist im Labor zu pruefen.)' }
+        $res = Get-SmAdNtdsutilResult -ExitCode $r.ExitCode -Lines $r.Lines -Secret $Password
+        # Die Ausgabe wird nie roh angezeigt oder protokolliert (sie koennte das Kennwort wiedergeben): nur die bereinigte Statuszeile.
+        if (-not $res.Ok) { throw ('ntdsutil hat das Kennwort nicht bestaetigt (Exitcode {0}, {1}). Status: {2}. Bitte die Variante Synchronisieren nutzen.' -f $res.ExitCode, $(if ($res.SuccessMessage) { 'Erfolgsmeldung vorhanden' } else { 'keine Erfolgsmeldung' }), $res.Status) }
+        [pscustomobject]@{ Detail = 'ntdsutil: Erfolgsmeldung erkannt; Kennwort nicht protokolliert' }
     }
 }
 
@@ -498,35 +647,240 @@ function Invoke-SmAdRaiseLevel {
 
 # ---------------------------------------------------------------- Schema (adprep)
 
-function Test-SmAdMicrosoftSigned {
-    <# adprep.exe muss eine gueltige Microsoft-Signatur haben. #>
+# Thumbprints der bekannten Microsoft-Stammzertifikate (SHA-1). Eine Kette muss in einem davon enden.
+$script:SmAdMicrosoftRoots = @{
+    '3B1EFD3A66EA28B16697394703A72CA340A05BD5' = 'Microsoft Root Certificate Authority 2010'
+    '8F43288AD272F3103B6FB1428485EA3014C0BCFE' = 'Microsoft Root Certificate Authority 2011'
+    'CDD4EEAE6000AC7F40C3802C171E30148030C072' = 'Microsoft Root Certificate Authority'
+    '7F88CD7223F3C813818C994614A89C99FA3B5247' = 'Microsoft Authenticode(tm) Root Authority'
+    '06F1AA330B927B753A40E68CDF22E34BCBEF3352' = 'Microsoft ECC Product Root Certificate Authority 2018'
+}
+$script:SmAdCdRomRoots = $null          # nur fuer Tests: Liste von Ordnern, die als "CD-ROM-Laufwerk" gelten
+$script:SmAdAdprepMaxFiles = 500
+$script:SmAdAdprepMaxBytes = 500MB
+$script:SmAdSignableExtensions = @('.exe', '.dll', '.sys', '.ocx')
+
+function ConvertFrom-SmAdDn {
+    <# Zerlegt einen Distinguished Name in Typ/Wert-Paare (Komma oder Semikolon trennen, Anfuehrungszeichen und Backslash werden beachtet).
+       Mehrwertige Namensteile (+) und Teile ohne "=" gelten als ungueltig (Rueckgabe $null). #>
+    param([AllowEmptyString()][string]$Dn)
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $cur = New-Object System.Text.StringBuilder; $inQ = $false; $bad = $false
+    for ($i = 0; $i -lt $Dn.Length; $i++) {
+        $c = $Dn[$i]
+        if ($c -eq [char]92 -and $i + 1 -lt $Dn.Length) { [void]$cur.Append($Dn[$i + 1]); $i++; continue }
+        if ($c -eq [char]34) { $inQ = -not $inQ; continue }
+        if (-not $inQ -and $c -eq [char]43) { $bad = $true; continue }
+        if (-not $inQ -and ($c -eq [char]44 -or $c -eq [char]59)) { $parts.Add($cur.ToString()); [void]$cur.Clear(); continue }
+        [void]$cur.Append($c)
+    }
+    if ($inQ -or $bad) { return $null }
+    $parts.Add($cur.ToString())
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $parts) {
+        $ix = $p.IndexOf('=')
+        if ($ix -lt 1) { return $null }
+        $out.Add([pscustomobject]@{ Type = $p.Substring(0, $ix).Trim().ToUpperInvariant(); Value = $p.Substring($ix + 1).Trim() })
+    }
+    , $out.ToArray()
+}
+
+function Test-SmAdSignerSubject {
+    <# Genau ein CN aus der Liste und genau ein O "Microsoft Corporation" (exakt, gross/klein beachtet), nicht per Regex auf den ganzen Text. #>
+    param([AllowEmptyString()][string]$Subject, [string[]]$CommonNames = @('Microsoft Windows'))
+    $rdn = ConvertFrom-SmAdDn $Subject
+    if ($null -eq $rdn) { return $false }
+    $cn = @($rdn | Where-Object { $_.Type -eq 'CN' }); $o = @($rdn | Where-Object { $_.Type -eq 'O' })
+    ($cn.Count -eq 1 -and $o.Count -eq 1 -and ($CommonNames -ccontains $cn[0].Value) -and $o[0].Value -ceq 'Microsoft Corporation')
+}
+
+function Get-SmAdSignatureInfo {
+    <# Status, Signer-Subject und Thumbprint des Wurzelzertifikats der Kette einer Datei. #>
     param([Parameter(Mandatory)][string]$Path)
     $sig = Get-AuthenticodeSignature -LiteralPath $Path
-    $sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'O=Microsoft Corporation'
+    $info = [pscustomobject]@{ Status = [string]$sig.Status; Subject = $null; RootThumbprint = $null }
+    if ($sig.SignerCertificate) {
+        $info.Subject = [string]$sig.SignerCertificate.Subject
+        $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+        try {
+            $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            [void]$chain.Build($sig.SignerCertificate)
+            if ($chain.ChainElements.Count -gt 0) {
+                $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+                if ($root.Subject -ceq $root.Issuer) { $info.RootThumbprint = [string]$root.Thumbprint }   # nur eine echte Wurzel zaehlt
+            }
+        }
+        finally { $chain.Reset() }
+    }
+    $info
+}
+
+function Test-SmAdMicrosoftSigned {
+    <# Gueltige Authenticode-Signatur, Signer mit CN und O exakt Microsoft, Kette endet in einer bekannten Microsoft-Wurzel. #>
+    param([Parameter(Mandatory)][string]$Path, [string[]]$CommonNames = @('Microsoft Windows'))
+    $i = Get-SmAdSignatureInfo -Path $Path
+    [bool](($i.Status -eq 'Valid') -and (Test-SmAdSignerSubject -Subject $i.Subject -CommonNames $CommonNames) -and $i.RootThumbprint -and $script:SmAdMicrosoftRoots.ContainsKey($i.RootThumbprint.ToUpperInvariant()))
+}
+
+function Get-SmAdOriginalFileName {
+    param([Parameter(Mandatory)][string]$Path)
+    [string](Get-Item -LiteralPath $Path).VersionInfo.OriginalFilename
+}
+
+function Get-SmAdCdRomRoots {
+    <# Laufwerke vom Typ CD-ROM (auch gemountete ISO-Abbilder und DVDs), nur bereit. #>
+    if ($null -ne $script:SmAdCdRomRoots) { return @($script:SmAdCdRomRoots) }
+    $r = @()
+    foreach ($d in [IO.DriveInfo]::GetDrives()) { if ($d.DriveType -eq [IO.DriveType]::CDRom -and $d.IsReady) { $r += $d.Name } }
+    $r
+}
+
+function Get-SmAdTree {
+    <# Alle Dateien und Ordner unter Root, ohne Verknuepfungen zu folgen: jeder ReparsePoint bricht ab. Begrenzt Anzahl und Groesse. #>
+    param([Parameter(Mandatory)][string]$Root)
+    $top = New-Object IO.DirectoryInfo $Root
+    if (-not $top.Exists) { throw ('Ordner fehlt: ' + $Root) }
+    if ($top.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('Der Ordner ist eine Verknuepfung, abgebrochen: ' + $Root) }
+    $rootLen = $top.FullName.TrimEnd('\').Length + 1
+    $files = [System.Collections.Generic.List[object]]::new(); $dirs = [System.Collections.Generic.List[object]]::new()
+    $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]; $stack.Push($top); $bytes = 0L
+    while ($stack.Count) {
+        $d = $stack.Pop()
+        foreach ($e in $d.GetFileSystemInfos()) {
+            if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('Verknuepfung gefunden, abgebrochen: ' + $e.FullName) }
+            $rel = $e.FullName.Substring($rootLen)
+            if ($e.Attributes -band [IO.FileAttributes]::Directory) { $dirs.Add([pscustomobject]@{ Rel = $rel; Full = $e.FullName }); $stack.Push($e) }
+            else {
+                $bytes += $e.Length
+                $files.Add([pscustomobject]@{ Rel = $rel; Full = $e.FullName; Length = [long]$e.Length })
+                if ($files.Count -gt $script:SmAdAdprepMaxFiles -or $bytes -gt $script:SmAdAdprepMaxBytes) { throw 'Der Ordner support\adprep ist ungewoehnlich gross, abgebrochen.' }
+            }
+        }
+    }
+    [pscustomobject]@{ Files = $files.ToArray(); Dirs = @($dirs.ToArray() | Sort-Object { $_.Rel.Length }) }
 }
 
 function Get-SmAdAdprepMedia {
-    <# Prueft den Medienpfad und liefert adprep.exe, ihre Version und die vermutete Server-Version. #>
+    <# Nur ein eingebundenes Installationsmedium (Laufwerk vom Typ CD-ROM, Wurzel des Laufwerks). Kein UNC, kein beliebiger Ordner.
+       Liefert Wurzel, adprep.exe, Version und die vermutete Server-Version (nur zur Anzeige; massgeblich ist die geprueft Kopie). #>
     param([Parameter(Mandatory)][string]$MediaPath)
-    if ($MediaPath -notmatch '^(?:[A-Za-z]:\\|\\\\)[^"''<>|*?\r\n]*$') { throw 'Der Medienpfad ist nicht erlaubt (Laufwerk oder UNC-Pfad ohne Anfuehrungszeichen).' }
-    $full = [IO.Path]::GetFullPath($MediaPath)
+    if ($MediaPath -match '["''<>|*?\r\n]') { throw 'Der Medienpfad enthaelt unerlaubte Zeichen.' }
+    $real = $null -eq $script:SmAdCdRomRoots
+    if ($real -and $MediaPath -notmatch '^[A-Za-z]:\\?$') { throw 'Als Quelle ist nur ein eingebundenes Installationsmedium erlaubt (Laufwerk vom Typ CD-ROM, z. B. ein gemountetes ISO). Kein Netzwerkpfad und kein Ordner.' }
+    if (-not [IO.Path]::IsPathRooted($MediaPath) -or $MediaPath.StartsWith('\\')) { throw 'Als Quelle ist nur ein eingebundenes Installationsmedium erlaubt (Laufwerk vom Typ CD-ROM). Kein Netzwerkpfad und kein relativer Pfad.' }
+    $full = [IO.Path]::GetFullPath($MediaPath.TrimEnd('\') + '\').TrimEnd('\')
+    $hit = $null
+    foreach ($r in @(Get-SmAdCdRomRoots)) { if ([IO.Path]::GetFullPath(([string]$r).TrimEnd('\') + '\').TrimEnd('\') -ieq $full) { $hit = $r } }
+    if (-not $hit) { throw 'Das ist kein eingebundenes Installationsmedium (Laufwerk vom Typ CD-ROM). Das ISO erst einbinden und dessen Laufwerk waehlen.' }
     $exe = Join-Path $full 'support\adprep\adprep.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Auf dem Medium fehlt support\adprep\adprep.exe.' }
     $fv = (Get-Item -LiteralPath $exe).VersionInfo
     $ver = [string]$fv.ProductVersion
     if (-not $ver) { $ver = [string]$fv.FileVersion }
     $srv = Get-SmAdAdprepServerName $ver
-    [pscustomobject]@{ Path = $exe; Version = $ver; ServerName = $(if ($srv) { $srv.Name } else { $null }); ExpectedSchema = $(if ($srv) { $srv.Schema } else { $null }) }
+    [pscustomobject]@{ Root = $full; Path = $exe; Version = $ver; ServerName = $(if ($srv) { $srv.Name } else { $null }); ExpectedSchema = $(if ($srv) { $srv.Schema } else { $null }) }
+}
+
+function Get-SmAdMediaDrives {
+    <# Fuer die Oberflaeche: CD-ROM-Laufwerke mit support\adprep\adprep.exe. #>
+    @(Get-SmAdCdRomRoots | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'support\adprep\adprep.exe') -PathType Leaf })
+}
+
+function Copy-SmAdAdprepTree {
+    <# Kopiert den ganzen Ordner (Datei fuer Datei, neue Dateien, keine Verknuepfungen) und liefert je Datei den SHA256 der Quelle (waehrend des Kopierens berechnet). #>
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Dest)
+    $tree = Get-SmAdTree -Root $Source
+    foreach ($d in $tree.Dirs) { Protect-SmDnsStateDir -Path (Join-Path $Dest $d.Rel) }
+    $res = [System.Collections.Generic.List[object]]::new()
+    $buf = [byte[]]::new(81920)
+    foreach ($f in $tree.Files) {
+        $in = $null; $out = $null; $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $in = [IO.File]::Open($f.Full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $out = [IO.File]::Open((Join-Path $Dest $f.Rel), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { [void]$sha.TransformBlock($buf, 0, $n, $null, 0); $out.Write($buf, 0, $n) }
+            [void]$sha.TransformFinalBlock($buf, 0, 0)
+            $res.Add([pscustomobject]@{ Rel = $f.Rel; SourceHash = ([BitConverter]::ToString($sha.Hash) -replace '-', '') })
+        }
+        finally { if ($out) { $out.Dispose() }; if ($in) { $in.Dispose() }; $sha.Dispose() }
+    }
+    $res.ToArray()
+}
+
+function Invoke-SmAdWithAdprepCopy {
+    <#
+    Kopiert support\adprep des Mediums in einen neuen, gehaerteten Ordner AD\adprep-<GUID>, haelt alle Dateien der Kopie mit FileShare.Read offen,
+    prueft die Kopie (Signaturen, Dateiname, SHA256 gegen die Quelle) und ruft dann $Body ($Check, $CopyDir) auf. Danach werden die Handles
+    freigegeben und die Kopie geloescht, auch bei Fehlern.
+    #>
+    param([Parameter(Mandatory)][string]$MediaRoot, [Parameter(Mandatory)][scriptblock]$Body)
+    $copyDir = $null; $handles = [System.Collections.Generic.List[IO.FileStream]]::new()
+    try {
+        $copyDir = Join-Path (Get-SmAdFolder) ('adprep-' + [guid]::NewGuid().ToString())
+        Protect-SmDnsStateDir -Path $copyDir
+        $copied = @(Copy-SmAdAdprepTree -Source (Join-Path $MediaRoot 'support\adprep') -Dest $copyDir)
+        $tree = Get-SmAdTree -Root $copyDir      # die Kopie selbst darf keine Verknuepfung enthalten
+        $problems = [System.Collections.Generic.List[string]]::new(); $files = [System.Collections.Generic.List[object]]::new()
+        foreach ($f in $tree.Files) { $handles.Add([IO.File]::Open($f.Full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)) }   # ab jetzt nicht mehr aenderbar
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            for ($i = 0; $i -lt $tree.Files.Count; $i++) {
+                $f = $tree.Files[$i]; $h = $handles[$i]
+                [void]$h.Seek(0, [IO.SeekOrigin]::Begin)
+                $hash = [BitConverter]::ToString($sha.ComputeHash($h)) -replace '-', ''
+                $src = @($copied | Where-Object { $_.Rel -ieq $f.Rel }) | Select-Object -First 1
+                if (-not $src -or $src.SourceHash -ne $hash) { $problems.Add($f.Rel + ': die Kopie weicht von der Quelle ab') }
+                $ext = [IO.Path]::GetExtension($f.Rel).ToLowerInvariant()
+                $signed = $null
+                if ($f.Rel -ieq 'adprep.exe') {
+                    $signed = Test-SmAdMicrosoftSigned -Path $f.Full -CommonNames @('Microsoft Windows')
+                    if (-not $signed) { $problems.Add('adprep.exe: keine gueltige Microsoft-Signatur (CN Microsoft Windows, O Microsoft Corporation, Kette in einer Microsoft-Wurzel)') }
+                    if ((Get-SmAdOriginalFileName -Path $f.Full) -ine 'adprep.exe') { $problems.Add('adprep.exe: der urspruengliche Dateiname (VersionInfo) ist nicht adprep.exe') }
+                }
+                elseif ($script:SmAdSignableExtensions -contains $ext) {
+                    $signed = Test-SmAdMicrosoftSigned -Path $f.Full -CommonNames @('Microsoft Windows', 'Microsoft Corporation')
+                    if (-not $signed) { $problems.Add($f.Rel + ': keine gueltige Microsoft-Signatur') }
+                }
+                $files.Add([pscustomobject]@{ Rel = $f.Rel; Sha256 = $hash; Signed = $signed })
+            }
+        }
+        finally { $sha.Dispose() }
+        if (-not @($files | Where-Object { $_.Rel -ieq 'adprep.exe' }).Count) { $problems.Add('adprep.exe fehlt im Ordner support\adprep') }
+        $exe = Join-Path $copyDir 'adprep.exe'
+        $ver = ''; $srv = $null
+        if (Test-Path -LiteralPath $exe -PathType Leaf) {
+            $fv = (Get-Item -LiteralPath $exe).VersionInfo; $ver = [string]$fv.ProductVersion; if (-not $ver) { $ver = [string]$fv.FileVersion }
+            $srv = Get-SmAdAdprepServerName $ver
+        }
+        $check = [pscustomobject]@{ Ok = ($problems.Count -eq 0); Problems = $problems.ToArray(); Files = $files.ToArray(); Version = $ver; ExpectedSchema = $(if ($srv) { $srv.Schema } else { $null }); ServerName = $(if ($srv) { $srv.Name } else { $null }) }
+        if (-not $check.Ok) { throw ('Pruefung der Kopie nicht bestanden, nichts gestartet: ' + ($check.Problems -join '; ')) }
+        & $Body $check $copyDir
+    }
+    finally {
+        foreach ($h in $handles) { try { $h.Dispose() } catch { } }
+        if ($copyDir -and (Test-Path -LiteralPath $copyDir)) {
+            try { [IO.Directory]::Delete($copyDir, $true) }
+            catch { try { [void](Write-SmAdAudit -Action 'adprep Kopie aufraeumen' -Target $copyDir -Result 'fehlgeschlagen' -Detail $_.Exception.Message) } catch { } }
+        }
+    }
+}
+
+function Format-SmAdAdprepFiles {
+    param([Parameter(Mandatory)]$Check)
+    $lines = @('Dateien der Kopie (SHA256):')
+    foreach ($f in $Check.Files) { $lines += ('  {0}  {1}  [{2}]' -f $f.Sha256, $f.Rel, $(if ($f.Signed -eq $true) { 'Microsoft-Signatur gueltig' } else { 'nicht signierbar: nur Hash' })) }
+    $lines += 'Nicht signierbare Dateien (z. B. .ldf) kann das Tool nicht pruefen: Nur ein originales Microsoft-ISO verwenden.'
+    $lines -join "`r`n"
 }
 
 function Test-SmAdAdprepPrecheck {
-    param([Parameter(Mandatory)][string]$MediaPath, [Parameter(Mandatory)][ValidateSet('Forest', 'Domain')][string]$Phase)
+    <# Vorpruefung VOR dem Kopieren (Rechte, Rollen, Replikation). Mit -VerifyCopy zusaetzlich eine Probe-Kopie mit Pruefung, die danach geloescht wird. #>
+    param([Parameter(Mandatory)][string]$MediaPath, [Parameter(Mandatory)][ValidateSet('Forest', 'Domain')][string]$Phase, [switch]$VerifyCopy)
     $checks = New-Object System.Collections.Generic.List[object]
     $checks.Add((New-SmAdCheck 'Administrator' (Test-SmAdIsAdmin) 'Das Fenster muss als Administrator laufen.'))
     $media = $null
-    try { $media = Get-SmAdAdprepMedia -MediaPath $MediaPath; $checks.Add((New-SmAdCheck 'Installationsmedium' $true ('adprep.exe {0}{1}' -f $media.Version, $(if ($media.ServerName) { ' (vermutlich ' + $media.ServerName + ')' } else { '' })))) }
+    try { $media = Get-SmAdAdprepMedia -MediaPath $MediaPath; $checks.Add((New-SmAdCheck 'Installationsmedium' $true ('Laufwerk {0}, adprep.exe {1}{2}' -f $media.Root, $media.Version, $(if ($media.ServerName) { ' (vermutlich ' + $media.ServerName + ')' } else { '' })))) }
     catch { $checks.Add((New-SmAdCheck 'Installationsmedium' $false $_.Exception.Message)) }
-    if ($media) { $signed = Test-SmAdMicrosoftSigned -Path $media.Path; $checks.Add((New-SmAdCheck 'adprep.exe von Microsoft signiert' $signed $(if ($signed) { 'gueltige Signatur' } else { 'Signatur fehlt oder ist ungueltig' }))) }
     Assert-SmAdModule
     $m = Get-SmAdFsmoMap
     if ($Phase -eq 'Forest') {
@@ -542,27 +896,41 @@ function Test-SmAdAdprepPrecheck {
     $repl = Test-SmAdReplication
     $checks.Add((New-SmAdCheck 'Replikation ohne Fehler' $repl.Ok $(if ($repl.Ok) { 'keine Fehler' } else { 'Replikationsfehler oder nicht pruefbar' })))
     $checks.Add((New-SmAdCheck 'Sicherung' $true 'Vor /forestprep eine aktuelle Systemstatus-Sicherung der Schemamasters und eines weiteren DCs je Domaene anlegen. Nach der Schemaerweiterung hilft nur eine Gesamtstruktur-Wiederherstellung.' $false))
+    $checks.Add((New-SmAdCheck 'Nur ein originales Microsoft-ISO verwenden' $true 'Das Tool kopiert support\adprep in einen gesicherten Ordner und prueft dort die Signaturen. Nicht signierbare Dateien (.ldf) kann es nicht pruefen; ihre SHA256 werden angezeigt und protokolliert.' $false))
     $checks.Add((New-SmAdCheck 'Hinweis' $true 'Ab Windows Server 2012 laufen /forestprep und /domainprep beim Heraufstufen eines DCs automatisch. Dieser Schritt ist nur noetig, wenn das Schema vorab erweitert werden soll.' $false))
-    [pscustomobject]@{ Checks = $checks.ToArray(); Ok = (Test-SmAdChecksPassed $checks.ToArray()); Media = $media }
+    $copy = $null
+    if ($VerifyCopy -and $media -and (Test-SmAdChecksPassed $checks.ToArray())) {
+        try { $copy = Invoke-SmAdWithAdprepCopy -MediaRoot $media.Root -Body { param($ck, $dir) $ck }; $checks.Add((New-SmAdCheck 'Probe-Kopie geprueft' $true ('{0} Dateien, adprep.exe mit gueltiger Microsoft-Signatur' -f @($copy.Files).Count))) }
+        catch { $checks.Add((New-SmAdCheck 'Probe-Kopie geprueft' $false $_.Exception.Message)) }
+    }
+    [pscustomobject]@{ Checks = $checks.ToArray(); Ok = (Test-SmAdChecksPassed $checks.ToArray()); Media = $media; Copy = $copy }
 }
 
 function Invoke-SmAdAdprep {
-    <# /forestprep oder /domainprep vom Medium. Antwortet auf die Rueckfrage mit C. Ausgabe kommt in eine Datei im gehaerteten AD-Ordner und in die Rueckgabe. #>
+    <# /forestprep oder /domainprep, nur aus der geprueften Kopie. Reihenfolge: Vorpruefung (Replikation usw.), Kopie, Pruefung, Start, Aufraeumen.
+       Antwortet auf die Rueckfrage mit C. Ausgabe kommt in eine Datei im gehaerteten AD-Ordner und in die Rueckgabe. #>
     param([Parameter(Mandatory)][string]$MediaPath, [Parameter(Mandatory)][ValidateSet('Forest', 'Domain')][string]$Phase, [switch]$Confirmed)
     Invoke-SmAdAudited -What ("adprep /$($Phase.ToLower())prep") -Subject ($env:COMPUTERNAME + ' ' + $MediaPath) -Body {
         if (-not $Confirmed) { throw 'Nicht bestaetigt, nichts geaendert.' }
         $pre = Test-SmAdAdprepPrecheck -MediaPath $MediaPath -Phase $Phase
         if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden, nichts geaendert: ' + ((@($pre.Checks | Where-Object { $_.Blocking -and -not $_.Ok } | ForEach-Object { $_.Name })) -join '; ')) }
         $before = Get-SmAdSchemaVersion
-        $arg = if ($Phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
-        $r = Invoke-SmAdProcess -FilePath $pre.Media.Path -Arguments $arg -StdIn @('C') -TimeoutSec $script:SmAdAdprepTimeoutSec
-        $logFile = Join-Path (Get-SmAdFolder) ('adprep-{0}-{1:yyyyMMdd-HHmmss}.log' -f $Phase.ToLower(), (Get-Date))
-        [IO.File]::WriteAllText($logFile, (($r.Lines) -join "`r`n"), (New-Object Text.UTF8Encoding $false))
+        $adprepArg = if ($Phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
+        $adprepPhase = $Phase
+        $run = Invoke-SmAdWithAdprepCopy -MediaRoot $pre.Media.Root -Body {
+            param($ck, $dir)
+            foreach ($f in $ck.Files) { [void](Write-SmAdAudit -Action 'adprep Datei' -Target $f.Rel -Result 'sha256' -Detail ($f.Sha256 + $(if ($f.Signed -eq $true) { ' (Microsoft-Signatur gueltig)' } else { ' (nicht signierbar)' }))) }
+            $pr = Invoke-SmAdProcess -FilePath (Join-Path $dir 'adprep.exe') -Arguments $adprepArg -StdIn @('C') -TimeoutSec $script:SmAdAdprepTimeoutSec
+            [pscustomobject]@{ Process = $pr; Check = $ck }
+        }
+        $r = $run.Process
+        $logFile = Join-Path (Get-SmAdFolder) ('adprep-{0}-{1:yyyyMMdd-HHmmss}.log' -f $adprepPhase.ToLower(), (Get-Date))
+        [IO.File]::WriteAllText($logFile, ((@($r.Lines) + '' + (Format-SmAdAdprepFiles $run.Check)) -join "`r`n"), (New-Object Text.UTF8Encoding $false))
         if ($r.ExitCode -ne 0) { throw ('adprep meldete einen Fehler (Exitcode {0}); Ausgabe in {1}' -f $r.ExitCode, $logFile) }
         $after = Get-SmAdSchemaVersion
         $note = ''
-        if ($Phase -eq 'Forest' -and $pre.Media.ExpectedSchema -and $after -ne $pre.Media.ExpectedSchema) { $note = ' (erwartet laut Medium: ' + $pre.Media.ExpectedSchema + ')' }
-        [pscustomobject]@{ Before = $before; After = $after; Lines = $r.Lines; LogFile = $logFile; Detail = ('Schema-Version {0} -> {1}{2}' -f $before, $after, $note) }
+        if ($adprepPhase -eq 'Forest' -and $run.Check.ExpectedSchema -and $after -ne $run.Check.ExpectedSchema) { $note = ' (erwartet laut Medium: ' + $run.Check.ExpectedSchema + ')' }
+        [pscustomobject]@{ Before = $before; After = $after; Lines = $r.Lines; LogFile = $logFile; Files = $run.Check.Files; Detail = ('Schema-Version {0} -> {1}{2}' -f $before, $after, $note) }
     }
 }
 
@@ -576,7 +944,7 @@ function Get-SmAdServerPageXaml {
 function Get-SmAdServerUiNames {
     @('BoxAdAdmin', 'BoxAdModule', 'ChkAdDns', 'BtnAdOverview', 'BtnAdUpload', 'TxtAdOverview', 'TxtAdOverviewState',
         'ChkAdPdc', 'ChkAdRid', 'ChkAdInfra', 'ChkAdSchema', 'ChkAdNaming', 'BtnAdFsmoAll', 'BtnAdFsmoCheck', 'BtnAdFsmoMove', 'TxtAdFsmoOut',
-        'CmbAdSeizeRole', 'TxtAdSeizeConfirm', 'BtnAdSeizeCheck', 'BtnAdSeize',
+        'CmbAdSeizeRole', 'ChkAdSeizeGone', 'TxtAdSeizeConfirm', 'BtnAdSeizeCheck', 'BtnAdSeize',
         'RbAdDsrmSync', 'RbAdDsrmPwd', 'TxtAdDsrmAccount', 'TxtAdDsrmDc', 'PwdAdDsrm1', 'PwdAdDsrm2', 'BtnAdDsrm', 'TxtAdDsrmOut',
         'CmbAdLevelScope', 'CmbAdLevelTarget', 'BtnAdLevelCheck', 'TxtAdLevelConfirm', 'BtnAdLevelRaise', 'TxtAdLevelOut',
         'TxtAdMedia', 'BtnAdMediaBrowse', 'BtnAdForestCheck', 'BtnAdForestPrep', 'BtnAdDomainCheck', 'BtnAdDomainPrep', 'TxtAdSchemaOut')
@@ -602,12 +970,13 @@ function Register-SmAdServerPage {
 
     $run = {
         # fuehrt $Script im Hintergrund aus, zeigt Ergebnis in $Out, protokolliert in der Oberflaeche
-        param([string]$Title, [scriptblock]$Script, [hashtable]$Params, $Out, [scriptblock]$Done)
+        param([string]$Title, [scriptblock]$Script, [hashtable]$Params, $Out, [scriptblock]$Done, [scriptblock]$Cleanup)
         $c = $script:SmAdUi
         $Out.Text = $Title + ' ...'
-        $job = @{ Out = $Out; Title = $Title; Done = $Done }
+        $job = @{ Out = $Out; Title = $Title; Done = $Done; Cleanup = $Cleanup }
         [void](Start-SmJob -Modules $c.Modules -Params $Params -Script $Script -OnDone {
                 param($result, $err)
+                if ($job.Cleanup) { try { & $job.Cleanup } catch { } }   # z. B. SecureStrings freigeben, auch im Fehlerfall
                 if ($err) { $job.Out.Text = $err; & $c.Log ('AD: ' + $job.Title + ' fehlgeschlagen: ' + (($err -replace '[\r\n]+', ' ').Trim())); return }
                 if ($job.Done) { & $job.Done $result[-1] }
             }.GetNewClosure())
@@ -670,20 +1039,23 @@ function Register-SmAdServerPage {
                 & $cc.Log ('AD: FSMO übertragen: ' + ($x.Moved -join ', '))
             }
         })
-    $Ui.TxtAdSeizeConfirm.Add_TextChanged({ $u = $script:SmAdUi.Ui; $u.BtnAdSeize.IsEnabled = ($script:SmAdUi.IsAdmin -and $script:SmAdUi.HasModule -and $u.TxtAdSeizeConfirm.Text -ceq [string]$u.CmbAdSeizeRole.SelectedItem) })
-    $Ui.CmbAdSeizeRole.Add_SelectionChanged({ $u = $script:SmAdUi.Ui; $u.BtnAdSeize.IsEnabled = ($script:SmAdUi.IsAdmin -and $script:SmAdUi.HasModule -and $u.TxtAdSeizeConfirm.Text -ceq [string]$u.CmbAdSeizeRole.SelectedItem) })
+    $c.SeizeEnable = { $u = $script:SmAdUi.Ui; $u.BtnAdSeize.IsEnabled = ($script:SmAdUi.IsAdmin -and $script:SmAdUi.HasModule -and [bool]$u.ChkAdSeizeGone.IsChecked -and $u.TxtAdSeizeConfirm.Text -ceq [string]$u.CmbAdSeizeRole.SelectedItem) }
+    $Ui.TxtAdSeizeConfirm.Add_TextChanged({ & $script:SmAdUi.SeizeEnable })
+    $Ui.CmbAdSeizeRole.Add_SelectionChanged({ & $script:SmAdUi.SeizeEnable })
+    $Ui.ChkAdSeizeGone.Add_Click({ & $script:SmAdUi.SeizeEnable })
     $Ui.BtnAdSeize.IsEnabled = $false
     $Ui.BtnAdSeizeCheck.Add_Click({
             $role = [string]$script:SmAdUi.Ui.CmbAdSeizeRole.SelectedItem
-            & $script:SmAdUi.Run 'Seize prüfen' { param($State, $P) $m = Get-SmAdFsmoMap; $h = $m.Map[$P.Role]; [pscustomobject]@{ Holder = $h; Local = (Test-SmAdIsLocalHost $h); Reachable = $(if (Test-SmAdIsLocalHost $h) { $true } else { Test-SmAdHostReachable -HostName $h }) } } @{ Role = $role } $script:SmAdUi.Ui.TxtAdFsmoOut {
-                param($x) $script:SmAdUi.Ui.TxtAdFsmoOut.Text = if ($x.Local) { 'Die Rolle liegt schon auf diesem Server.' } elseif ($x.Reachable) { "Der Inhaber $($x.Holder) ist erreichbar. Seize ist nicht erlaubt: bitte die Rolle normal übertragen." } else { "Der Inhaber $($x.Holder) ist nicht erreichbar. Seize ist möglich (nur wenn er dauerhaft ausgefallen ist)." }
+            $script:SmAdUi.Ui.TxtAdFsmoOut.Text = 'Prüfe den Inhaber dreimal im Abstand von 10 Sekunden (Ping, LDAP 389, RPC 135) ...'
+            & $script:SmAdUi.Run 'Seize prüfen' { param($State, $P) $m = Get-SmAdFsmoMap; $h = $m.Map[$P.Role]; $loc = Test-SmAdIsLocalHost $h; $pr = $null; $lr = $null; if (-not $loc) { $pr = Test-SmAdHolderProbe -HostName $h; $lr = Get-SmAdLastReplication -HostName $h }; [pscustomobject]@{ Holder = $h; Local = $loc; Reachable = $(if ($loc) { $true } else { $pr.Reachable }); Probe = $(if ($pr) { $pr.Text } else { '' }); LastRepl = $lr } } @{ Role = $role } $script:SmAdUi.Ui.TxtAdFsmoOut {
+                param($x) $script:SmAdUi.Ui.TxtAdFsmoOut.Text = if ($x.Local) { 'Die Rolle liegt schon auf diesem Server.' } elseif ($x.Reachable) { "Der Inhaber $($x.Holder) ist erreichbar ($($x.Probe)). Seize ist nicht erlaubt: bitte die Rolle normal übertragen." } else { "Der Inhaber $($x.Holder) antwortet nicht ($($x.Probe)).`r`nLetzte erfolgreiche Replikation des Inhabers: $($x.LastRepl)`r`nSeize ist möglich, aber nur wenn er dauerhaft entfernt ist und nie wieder ans Netz kommt (Haken setzen)." }
             }
         })
     $Ui.BtnAdSeize.Add_Click({
             $u = $script:SmAdUi.Ui; $role = [string]$u.CmbAdSeizeRole.SelectedItem
             if (-not (& $script:SmAdUi.Confirm 'FSMO-Rolle ÜBERNEHMEN (Seize)' $role ("ACHTUNG: Der bisherige Inhaber wird nicht gefragt. Der alte Domänencontroller darf danach NIE wieder ans Netz, sonst entsteht eine zweite Rolle mit Datenverlust und Inkonsistenzen in der Gesamtstruktur. Nur ausführen, wenn der Inhaber nachweislich nicht erreichbar ist und nie wiederkommt."))) { & $script:SmAdUi.Log 'AD: Seize abgebrochen.'; return }
-            & $script:SmAdUi.Run 'FSMO Seize' { param($State, $P) Invoke-SmAdFsmoSeize -Role $P.Role -TypedRole $P.Typed -Confirmed } @{ Role = $role; Typed = $u.TxtAdSeizeConfirm.Text } $u.TxtAdFsmoOut {
-                param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdFsmoOut.Text = 'Rolle übernommen: ' + $x.Detail; $cc.Ui.TxtAdSeizeConfirm.Text = ''; & $cc.Log ('AD: Seize: ' + $x.Detail)
+            & $script:SmAdUi.Run 'FSMO Seize' { param($State, $P) Invoke-SmAdFsmoSeize -Role $P.Role -TypedRole $P.Typed -Confirmed -OwnerPermanentlyRemoved:$P.Gone } @{ Role = $role; Typed = $u.TxtAdSeizeConfirm.Text; Gone = [bool]$u.ChkAdSeizeGone.IsChecked } $u.TxtAdFsmoOut {
+                param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdFsmoOut.Text = 'Rolle übernommen: ' + $x.Detail; $cc.Ui.TxtAdSeizeConfirm.Text = ''; $cc.Ui.ChkAdSeizeGone.IsChecked = $false; & $cc.Log ('AD: Seize: ' + $x.Detail)
             }
         })
 
@@ -691,23 +1063,38 @@ function Register-SmAdServerPage {
             $u = $script:SmAdUi.Ui
             if ($u.RbAdDsrmSync.IsChecked) {
                 $acct = $u.TxtAdDsrmAccount.Text.Trim()
-                if (-not (& $script:SmAdUi.Confirm 'DSRM-Kennwort synchronisieren' ($env:COMPUTERNAME + ' (DSRM-Konto) mit Domänenkonto ' + $acct) 'Das DSRM-Kennwort dieses Servers wird einmalig mit dem aktuellen Kennwort des Domänenkontos gleichgesetzt. Das Tool berührt kein Kennwort.')) { & $script:SmAdUi.Log 'AD: DSRM abgebrochen.'; return }
-                & $script:SmAdUi.Run 'DSRM synchronisieren' { param($State, $P) Invoke-SmAdDsrmSync -Account $P.Account -Confirmed } @{ Account = $acct } $u.TxtAdDsrmOut {
-                    param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdDsrmOut.Text = $x.Detail; & $cc.Log 'AD: DSRM-Kennwort mit Domänenkonto synchronisiert.'
+                # erst das Konto lesen (Warnungen), dann bestätigen lassen, dann ausführen
+                & $script:SmAdUi.Run 'DSRM-Konto prüfen' { param($State, $P) Get-SmAdDsrmAccountWarnings -Account $P.Account } @{ Account = $acct } $u.TxtAdDsrmOut {
+                    param($w)
+                    $cc = $script:SmAdUi; $u2 = $cc.Ui; $acct2 = $u2.TxtAdDsrmAccount.Text.Trim()
+                    $warn = if ($w.Warnings.Count) { (($w.Warnings -join "`r`n`r`n") + "`r`n`r`n") } else { '' }
+                    $u2.TxtAdDsrmOut.Text = $warn
+                    if (-not (& $cc.Confirm 'DSRM-Kennwort synchronisieren' ($env:COMPUTERNAME + ' (DSRM-Konto) mit Domänenkonto ' + $acct2) ($warn + 'Das DSRM-Kennwort dieses Servers wird einmalig mit dem aktuellen Kennwort des Domänenkontos gleichgesetzt. Das Tool berührt kein Kennwort. Empfohlen ist ein eigenes, deaktiviertes Konto.'))) { & $cc.Log 'AD: DSRM abgebrochen.'; return }
+                    & $cc.Run 'DSRM synchronisieren' { param($State, $P) Invoke-SmAdDsrmSync -Account $P.Account -Confirmed } @{ Account = $acct2 } $u2.TxtAdDsrmOut ({
+                        param($x) $c3 = $script:SmAdUi; $c3.Ui.TxtAdDsrmOut.Text = ($warn + $x.Detail); & $c3.Log 'AD: DSRM-Kennwort mit Domänenkonto synchronisiert.'
+                    }.GetNewClosure())
                 }
                 return
             }
             $dc = $u.TxtAdDsrmDc.Text.Trim()
             $target = if ($dc) { $dc } else { $env:COMPUTERNAME + ' (lokal)' }
             $p1 = $u.PwdAdDsrm1.SecurePassword; $p2 = $u.PwdAdDsrm2.SecurePassword
-            $cx = Test-SmAdPasswordComplexity $p1
-            if (-not $cx.Ok) { $u.TxtAdDsrmOut.Text = 'Das Kennwort ist nicht komplex genug: ' + ($cx.Problems -join '; '); return }
-            if (-not (Test-SmAdSecureEqual $p1 $p2)) { $u.TxtAdDsrmOut.Text = 'Die beiden Eingaben stimmen nicht überein.'; return }
-            if (-not (& $script:SmAdUi.Confirm 'DSRM-Kennwort setzen' $target 'Das neue DSRM-Kennwort wird nur über die Standardeingabe an ntdsutil gegeben und nirgends gespeichert oder protokolliert. Bitte merken oder im Tresor ablegen.')) { & $script:SmAdUi.Log 'AD: DSRM abgebrochen.'; return }
-            & $script:SmAdUi.Run 'DSRM-Kennwort setzen' { param($State, $P) Invoke-SmAdDsrmReset -Password $P.P1 -Confirm $P.P2 -Dc $P.Dc -Confirmed } @{ P1 = $p1; P2 = $p2; Dc = $dc } $u.TxtAdDsrmOut {
-                param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdDsrmOut.Text = $x.Detail; & $cc.Log 'AD: DSRM-Kennwort gesetzt (nicht protokolliert).'
+            $handedOver = $false
+            try {
+                $cx = Test-SmAdPasswordComplexity $p1
+                if (-not $cx.Ok) { $u.TxtAdDsrmOut.Text = 'Das Kennwort ist nicht komplex genug: ' + ($cx.Problems -join '; '); return }
+                if (-not (Test-SmAdSecureEqual $p1 $p2)) { $u.TxtAdDsrmOut.Text = 'Die beiden Eingaben stimmen nicht überein.'; return }
+                if (-not (& $script:SmAdUi.Confirm 'DSRM-Kennwort setzen' $target 'Das neue DSRM-Kennwort wird nur über die Standardeingabe an ntdsutil gegeben und nirgends gespeichert oder protokolliert. Bitte merken oder im Tresor ablegen. Variante B ist im Labor zu prüfen: nimmt ntdsutil das Kennwort nicht an (keine Erfolgsmeldung oder keine Antwort nach 60 Sekunden), bitte die Variante Synchronisieren nutzen.')) { & $script:SmAdUi.Log 'AD: DSRM abgebrochen.'; return }
+                # Die SecureStrings gehen an den Hintergrundauftrag und werden am Ende dort freigegeben (Erfolg und Fehler)
+                & $script:SmAdUi.Run 'DSRM-Kennwort setzen' { param($State, $P) Invoke-SmAdDsrmReset -Password $P.P1 -Confirm $P.P2 -Dc $P.Dc -Confirmed } @{ P1 = $p1; P2 = $p2; Dc = $dc } $u.TxtAdDsrmOut {
+                    param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdDsrmOut.Text = $x.Detail; & $cc.Log 'AD: DSRM-Kennwort gesetzt (nicht protokolliert).'
+                } ({ $p1.Dispose(); $p2.Dispose() }.GetNewClosure())
+                $handedOver = $true
             }
-            $u.PwdAdDsrm1.Clear(); $u.PwdAdDsrm2.Clear()
+            finally {
+                if (-not $handedOver) { $p1.Dispose(); $p2.Dispose() }
+                $u.PwdAdDsrm1.Clear(); $u.PwdAdDsrm2.Clear()
+            }
         })
 
     $levelArgs = {
@@ -754,16 +1141,19 @@ function Register-SmAdServerPage {
         })
 
     $Ui.BtnAdMediaBrowse.Add_Click({
-            Add-Type -AssemblyName System.Windows.Forms
-            $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Installationsmedium (Wurzel mit support\adprep) wählen'
-            if ($d.ShowDialog() -eq 'OK') { $script:SmAdUi.Ui.TxtAdMedia.Text = $d.SelectedPath }
+            # nur eingebundene Installationsmedien (Laufwerk vom Typ CD-ROM, z. B. gemountetes ISO); kein Ordner- und kein Netzwerkpfad
+            $u = $script:SmAdUi.Ui; $drives = @(Get-SmAdMediaDrives)
+            if (-not $drives.Count) { $u.TxtAdSchemaOut.Text = 'Kein eingebundenes Installationsmedium mit support\adprep\adprep.exe gefunden. Das Windows-Server-ISO per Rechtsklick „Bereitstellen“ einbinden und erneut suchen.'; return }
+            $cur = $u.TxtAdMedia.Text.Trim(); $ix = [array]::IndexOf(@($drives | ForEach-Object { $_.TrimEnd('\') }), $cur.TrimEnd('\'))
+            $u.TxtAdMedia.Text = $drives[($ix + 1) % $drives.Count]
+            $u.TxtAdSchemaOut.Text = 'Laufwerke mit adprep: ' + ($drives -join ', ') + '. Nur ein originales Microsoft-ISO verwenden.'
         })
     $Ui.BtnAdForestCheck.Tag = 'Forest'; $Ui.BtnAdForestPrep.Tag = 'Forest'; $Ui.BtnAdDomainCheck.Tag = 'Domain'; $Ui.BtnAdDomainPrep.Tag = 'Domain'
     foreach ($b in $Ui.BtnAdForestCheck, $Ui.BtnAdDomainCheck) {
         $b.Add_Click({
                 param($sender, $e)
                 $u = $script:SmAdUi.Ui; $phase = [string]$sender.Tag; $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
-                & $script:SmAdUi.Run "adprep $cmd prüfen" { param($State, $P) $x = Test-SmAdAdprepPrecheck -MediaPath $P.Media -Phase $P.Phase; [pscustomobject]@{ Ok = $x.Ok; Text = (Format-SmAdChecks $x.Checks); Schema = $(try { Get-SmAdSchemaVersion } catch { 0 }) } } @{ Media = $u.TxtAdMedia.Text.Trim(); Phase = $phase } $u.TxtAdSchemaOut {
+                & $script:SmAdUi.Run "adprep $cmd prüfen" { param($State, $P) $x = Test-SmAdAdprepPrecheck -MediaPath $P.Media -Phase $P.Phase -VerifyCopy; [pscustomobject]@{ Ok = $x.Ok; Text = ((Format-SmAdChecks $x.Checks) + $(if ($x.Copy) { "`r`n`r`n" + (Format-SmAdAdprepFiles $x.Copy) } else { '' })); Schema = $(try { Get-SmAdSchemaVersion } catch { 0 }) } } @{ Media = $u.TxtAdMedia.Text.Trim(); Phase = $phase } $u.TxtAdSchemaOut {
                     param($x) $script:SmAdUi.Ui.TxtAdSchemaOut.Text = ($(if ($x.Ok) { "Vorprüfung bestanden.`r`n`r`n" } else { "Vorprüfung NICHT bestanden. Es wird nichts ausgeführt.`r`n`r`n" }) + $x.Text + "`r`n`r`nSchema-Version jetzt: $($x.Schema) ($(Get-SmAdSchemaName $x.Schema))")
                 }
             })
@@ -772,9 +1162,9 @@ function Register-SmAdServerPage {
         $b.Add_Click({
                 param($sender, $e)
                 $u = $script:SmAdUi.Ui; $media = $u.TxtAdMedia.Text.Trim(); $phase = [string]$sender.Tag; $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
-                if (-not (& $script:SmAdUi.Confirm "adprep $cmd" ("Medium $media, Gesamtstruktur bzw. Domäne dieses Servers") "adprep $cmd erweitert das Schema bzw. die Domäne. Die Änderung wird repliziert und lässt sich nur durch eine Gesamtstruktur-Wiederherstellung zurücknehmen. Eine aktuelle Systemstatus-Sicherung wird dringend empfohlen. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch.")) { & $script:SmAdUi.Log 'AD: adprep abgebrochen.'; return }
+                if (-not (& $script:SmAdUi.Confirm "adprep $cmd" ("Medium $media, Gesamtstruktur bzw. Domäne dieses Servers") "adprep $cmd erweitert das Schema bzw. die Domäne. Die Änderung wird repliziert und lässt sich nur durch eine Gesamtstruktur-Wiederherstellung zurücknehmen. Eine aktuelle Systemstatus-Sicherung wird dringend empfohlen. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch. Das Tool startet adprep nur aus einer geprüften Kopie des Mediums. Nicht signierbare Dateien (.ldf) kann es nicht prüfen: Nur ein originales Microsoft-ISO verwenden.")) { & $script:SmAdUi.Log 'AD: adprep abgebrochen.'; return }
                 & $script:SmAdUi.Run "adprep $cmd" { param($State, $P) Invoke-SmAdAdprep -MediaPath $P.Media -Phase $P.Phase -Confirmed } @{ Media = $media; Phase = $phase } $u.TxtAdSchemaOut {
-                    param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdSchemaOut.Text = ($x.Detail + "`r`n`r`n" + (($x.Lines | Select-Object -Last 40) -join "`r`n")); & $cc.Log ('AD: adprep ' + $x.Detail)
+                    param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdSchemaOut.Text = ($x.Detail + "`r`n`r`n" + (($x.Lines | Select-Object -Last 40) -join "`r`n") + "`r`n`r`n" + (Format-SmAdAdprepFiles ([pscustomobject]@{ Files = $x.Files }))); & $cc.Log ('AD: adprep ' + $x.Detail)
                 }
             })
     }
