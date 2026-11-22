@@ -75,7 +75,8 @@ function Protect-SmDnsStateDir {
         foreach ($sid in $AllowedSids) {
             $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
         }
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        # .NET statt Set-Acl: Set-Acl scheitert beim zweiten Aufruf auf einen schon gehaerteten Ordner an SeSecurityPrivilege, SetAccessControl nicht
+        [IO.Directory]::SetAccessControl($Path, $acl)
     }
     catch { throw "Die Zugriffsrechte des Sicherungsordners konnten nicht gesetzt werden: $($_.Exception.Message)" }
     $bad = @(Test-SmDnsStateDirAcl -Path $Path -AllowedSids $AllowedSids)

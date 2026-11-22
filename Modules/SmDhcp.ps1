@@ -17,6 +17,8 @@ $script:SmDhcpMaxXmlBytes = 1GB          # entpackte Export-XML
 $script:SmDhcpMaxDepth = 24              # Verschachtelung im JSON
 $script:SmDhcpMaxItems = 1000000         # Eintraege insgesamt (Optionen, Reservierungen, Ausschluesse ...)
 $script:SmDhcpMaxScopes = 4096
+$script:SmDhcpMaxLeasesPerScope = 100000   # Leases je Adresse in der Zusammenfassung (je Bereich)
+$script:SmDhcpMaxLeaseRows = 5000          # Zeilen mit Lease-Unterschieden im Vergleich (insgesamt)
 $script:SmDhcpSummaryEntry = 'dhcp-summary.json'
 $script:SmDhcpXmlEntry = 'dhcp-export.xml'
 
@@ -121,6 +123,18 @@ function ConvertTo-SmDhcpInt {
     $n
 }
 
+function ConvertTo-SmDhcpLeaseList {
+    <# Leases je Adresse (IPv4) mit Client-Kennung. Hoechstens SmDhcpMaxLeasesPerScope je Bereich, die Gesamtgrenze gilt ueber SmDhcpMaxItems. #>
+    param($List)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($l in (ConvertTo-SmDhcpList $List 'Leases je Adresse' $script:SmDhcpMaxLeasesPerScope)) {
+        $ip = ConvertTo-SmDhcpText (Get-SmDhcpProp $l 'Ip') 64
+        if (-not (Test-SmDhcpIp $ip 'v4')) { throw 'Zusammenfassung ungueltig: Lease-Adresse.' }
+        $out.Add([ordered]@{ Ip = $ip; ClientId = (ConvertTo-SmDhcpText (Get-SmDhcpProp $l 'ClientId') 64) })
+    }
+    , $out.ToArray()
+}
+
 function ConvertTo-SmDhcpSummary {
     <#
     .SYNOPSIS
@@ -144,6 +158,7 @@ function ConvertTo-SmDhcpSummary {
                 ScopeId = $id; Name = (ConvertTo-SmDhcpText (Get-SmDhcpProp $s 'Name') 256); Mask = $mask; Start = $start; End = $end
                 State = (ConvertTo-SmDhcpText (Get-SmDhcpProp $s 'State') 32); LeaseDuration = (ConvertTo-SmDhcpText (Get-SmDhcpProp $s 'LeaseDuration') 64)
                 Leases = (ConvertTo-SmDhcpInt (Get-SmDhcpProp $s 'Leases') 'Leases')
+                LeaseList = (ConvertTo-SmDhcpLeaseList (Get-SmDhcpProp $s 'LeaseList'))
                 Options = (ConvertTo-SmDhcpOptions (Get-SmDhcpProp $s 'Options') 'Bereichsoptionen')
                 Reservations = (ConvertTo-SmDhcpReservations (Get-SmDhcpProp $s 'Reservations') 'Reservierungen' 'v4')
                 Exclusions = (ConvertTo-SmDhcpRanges (Get-SmDhcpProp $s 'Exclusions') 'Ausschluesse' 'v4')
@@ -187,7 +202,7 @@ function ConvertTo-SmDhcpSummary {
     }
     [ordered]@{
         Format = 'SmDhcpSummary'; Version = 1; Server = $server; Created = (ConvertTo-SmDhcpText (Get-SmDhcpProp $Obj 'Created') 40)
-        Authorized = [bool](Get-SmDhcpProp $Obj 'Authorized')
+        Authorized = [bool](Get-SmDhcpProp $Obj 'Authorized'); LeasesIncluded = [bool](Get-SmDhcpProp $Obj 'LeasesIncluded')
         Scopes4 = $s4.ToArray(); Scopes6 = $s6.ToArray()
         ServerOptions4 = (ConvertTo-SmDhcpOptions (Get-SmDhcpProp $Obj 'ServerOptions4') 'Serveroptionen v4')
         ServerOptions6 = (ConvertTo-SmDhcpOptions (Get-SmDhcpProp $Obj 'ServerOptions6') 'Serveroptionen v6')
@@ -267,6 +282,150 @@ function Test-SmDhcpXmlSafe {
     finally { $r.Dispose(); $fs.Dispose() }
 }
 
+# ---------------------------------------------------------------- Pruefsumme und Inhalt der Export-XML
+
+function ConvertTo-SmDhcpShaText {
+    <# Eingegebene Pruefsumme normalisieren: Leerraum raus, Grossbuchstaben. Gueltig sind genau 64 Hexzeichen, sonst $null. #>
+    param([string]$Text)
+    $t = ([regex]::Replace([string]$Text, '\s', '')).ToUpperInvariant()
+    if ($t -match '^[0-9A-F]{64}$') { $t } else { $null }
+}
+
+function Test-SmDhcpShaMatch {
+    <# $true nur, wenn beide Werte vollstaendige SHA256 sind und gleich (ohne Gross-/Kleinschreibung und Leerraum). Leer oder zu kurz ist $false. #>
+    param([string]$Expected, [string]$Entered)
+    $a = ConvertTo-SmDhcpShaText $Expected; $b = ConvertTo-SmDhcpShaText $Entered
+    if (-not $a -or -not $b) { return $false }
+    [string]::Equals($a, $b, [StringComparison]::Ordinal)
+}
+
+# Optionen, die aus der Export-XML gelesen und mit der Zusammenfassung verglichen werden (Router, DNS-Server, Domainname, WINS/NetBIOS-Knotentyp, WPAD)
+$script:SmDhcpCheckedOptions = @(3, 6, 15, 44, 252)
+
+function Read-SmDhcpXmlFacts {
+    <#
+    .SYNOPSIS
+        Liest aus der Export-XML (Datenstrom, keine DTD) die Bereiche (IPv4: ScopeId, SubnetMask, Name; IPv6: Prefix) und die Optionen 3, 6, 15, 44, 252
+        auf Serverebene und je IPv4-Bereich. Das ist, was Import-DhcpServer wirklich importiert. Optionen von Reservierungen und Richtlinien zaehlen nicht.
+        Erwartete Form (aus der Struktur von Export-DhcpServer abgeleitet, noch gegen einen echten Export zu pruefen):
+        DHCPServer/IPv4[/Scopes]/Scope/{ScopeId,SubnetMask,Name,OptionValues/OptionValue/{OptionId,Value}}, DHCPServer/IPv4/OptionValues/..., IPv6/.../Scope/Prefix.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if ((Get-Item -LiteralPath $Path).Length -gt $script:SmDhcpMaxXmlBytes) { throw 'Die Export-XML ist groesser als erlaubt.' }
+    $set = New-Object Xml.XmlReaderSettings
+    $set.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $set.XmlResolver = $null
+    $set.MaxCharactersFromEntities = 1024
+    $set.CloseInput = $true
+    $s4 = New-Object System.Collections.Generic.List[object]; $s6 = New-Object System.Collections.Generic.List[object]
+    $serverOpt = @{}
+    $stk = New-Object System.Collections.Generic.List[string]
+    $cur = $null; $opt = $null
+    $fs = [IO.File]::OpenRead($Path)
+    $r = [Xml.XmlReader]::Create($fs, $set)
+    try {
+        while ($r.Read()) {
+            switch ($r.NodeType) {
+                'Element' {
+                    $name = $r.LocalName; $empty = $r.IsEmptyElement
+                    $n = $stk.Count
+                    if ($name -ceq 'Scope' -and $n -ge 1) {
+                        $fam = $null
+                        if ($stk[$n - 1] -ceq 'IPv4' -or ($n -ge 2 -and $stk[$n - 1] -ceq 'Scopes' -and $stk[$n - 2] -ceq 'IPv4')) { $fam = 'v4' }
+                        elseif ($stk[$n - 1] -ceq 'IPv6' -or ($n -ge 2 -and $stk[$n - 1] -ceq 'Scopes' -and $stk[$n - 2] -ceq 'IPv6')) { $fam = 'v6' }
+                        if ($fam -and -not $cur) { $cur = @{ Family = $fam; Id = ''; Mask = ''; Name = ''; Opts = @{}; Depth = $n } }
+                    }
+                    elseif ($name -ceq 'OptionValue' -and $n -ge 2 -and $stk[$n - 1] -ceq 'OptionValues') {
+                        $parent = $stk[$n - 2]
+                        if ($cur -and $parent -ceq 'Scope' -and $n -eq ($cur.Depth + 2) -and $cur.Family -eq 'v4') { $opt = @{ Target = 'scope'; Id = $null; Vals = New-Object System.Collections.Generic.List[string] } }
+                        elseif (-not $cur -and $parent -ceq 'IPv4') { $opt = @{ Target = 'server'; Id = $null; Vals = New-Object System.Collections.Generic.List[string] } }
+                    }
+                    if (-not $empty) { $stk.Add($name) }
+                    elseif ($name -ceq 'Scope' -and $cur -and $cur.Depth -eq $n) { $cur = $null }
+                }
+                { $_ -eq 'Text' -or $_ -eq 'CDATA' } {
+                    $t = $r.Value.Trim()
+                    if (-not $t) { break }
+                    $n = $stk.Count; $last = $stk[$n - 1]
+                    if ($cur -and $n -eq ($cur.Depth + 2) -and $stk[$n - 2] -ceq 'Scope') {
+                        if ($last -ceq 'ScopeId' -or $last -ceq 'Prefix') { $cur.Id = $t.Substring(0, [math]::Min($t.Length, 64)) }
+                        elseif ($last -ceq 'SubnetMask') { $cur.Mask = $t.Substring(0, [math]::Min($t.Length, 64)) }
+                        elseif ($last -ceq 'Name') { $cur.Name = (ConvertTo-SmDhcpText $t 256) }
+                    }
+                    if ($opt) {
+                        $oi = $stk.LastIndexOf('OptionValue')
+                        if ($oi -ge 0 -and $n -gt $oi + 1) {
+                            if ($n -eq $oi + 2 -and $last -ceq 'OptionId') { $id = 0; if ([int]::TryParse($t, [ref]$id)) { $opt.Id = $id } }
+                            elseif ($stk[$oi + 1] -ceq 'Value' -and $opt.Vals.Count -lt 64) { $opt.Vals.Add((ConvertTo-SmDhcpText $t 1024)) }
+                        }
+                    }
+                }
+                'EndElement' {
+                    $n = $stk.Count
+                    $name = $stk[$n - 1]
+                    $stk.RemoveAt($n - 1)
+                    if ($name -ceq 'OptionValue' -and $opt) {
+                        if ($null -ne $opt.Id -and $script:SmDhcpCheckedOptions -contains $opt.Id) {
+                            $v = $opt.Vals -join ','
+                            if ($opt.Target -eq 'server') { $serverOpt[[string]$opt.Id] = $v } elseif ($cur) { $cur.Opts[[string]$opt.Id] = $v }
+                        }
+                        $opt = $null
+                    }
+                    elseif ($name -ceq 'Scope' -and $cur -and $cur.Depth -eq ($n - 1)) {
+                        if ($cur.Family -eq 'v4') {
+                            if (-not (Test-SmDhcpIp $cur.Id 'v4')) { throw 'Die Export-XML enthaelt eine ungueltige Bereichs-ID.' }
+                            if ($cur.Mask -and -not (Test-SmDhcpIp $cur.Mask 'v4')) { throw 'Die Export-XML enthaelt eine ungueltige Subnetzmaske.' }
+                            $s4.Add([pscustomobject]@{ Id = $cur.Id; Mask = $cur.Mask; Name = $cur.Name; Options = $cur.Opts })
+                        }
+                        else {
+                            if (-not (Test-SmDhcpIp $cur.Id 'v6')) { throw 'Die Export-XML enthaelt einen ungueltigen IPv6-Praefix.' }
+                            $s6.Add([pscustomobject]@{ Id = $cur.Id; Name = $cur.Name })
+                        }
+                        if ($s4.Count + $s6.Count -gt $script:SmDhcpMaxScopes) { throw 'Die Export-XML enthaelt zu viele Bereiche.' }
+                        $cur = $null
+                    }
+                }
+            }
+        }
+    }
+    catch [Xml.XmlException] { throw ('Die Export-XML ist ungueltig oder enthaelt eine DTD: ' + $_.Exception.Message) }
+    finally { $r.Dispose(); $fs.Dispose() }
+    [pscustomobject]@{ Scopes4 = $s4.ToArray(); Scopes6 = $s6.ToArray(); ServerOptions = $serverOpt }
+}
+
+function ConvertTo-SmDhcpOptionTokens {
+    param([string]$Value)
+    (@([regex]::Split(([string]$Value).Trim().ToLowerInvariant(), '[,;\s]+') | Where-Object { $_ })) -join ','
+}
+
+function Compare-SmDhcpSummaryXml {
+    <# Liefert die Abweichungen (Texte) zwischen Zusammenfassung und Export-XML bei Bereichen (v4, v6) und den Optionen 3, 6, 15, 44, 252 (Server und Bereich). Leer = gleich. #>
+    param([Parameter(Mandatory)]$Summary, [Parameter(Mandatory)]$Facts)
+    $diff = New-Object System.Collections.Generic.List[string]
+    $sx4 = @($Summary.Scopes4 | ForEach-Object { $_.ScopeId }); $fx4 = @($Facts.Scopes4 | ForEach-Object { $_.Id })
+    $sx6 = @($Summary.Scopes6 | ForEach-Object { $_.Prefix }); $fx6 = @($Facts.Scopes6 | ForEach-Object { $_.Id })
+    foreach ($x in $sx4) { if ($fx4 -notcontains $x) { $diff.Add("Bereich $x steht in der Zusammenfassung, aber nicht in der Export-XML.") } }
+    foreach ($x in $fx4) { if ($sx4 -notcontains $x) { $diff.Add("Bereich $x steht in der Export-XML, aber nicht in der Zusammenfassung.") } }
+    foreach ($x in $sx6) { if ($fx6 -notcontains $x) { $diff.Add("IPv6-Praefix $x steht in der Zusammenfassung, aber nicht in der Export-XML.") } }
+    foreach ($x in $fx6) { if ($sx6 -notcontains $x) { $diff.Add("IPv6-Praefix $x steht in der Export-XML, aber nicht in der Zusammenfassung.") } }
+    $cmp = {
+        param([string]$Where, $SumOptions, $XmlOptions)
+        $sm = @{}; foreach ($o in @($SumOptions)) { if ($script:SmDhcpCheckedOptions -contains [int]$o.Id) { $sm[[string]$o.Id] = [string]$o.Value } }
+        foreach ($id in $script:SmDhcpCheckedOptions) {
+            $k = [string]$id; $inS = $sm.ContainsKey($k); $inX = $XmlOptions.ContainsKey($k)
+            if ($inS -and -not $inX) { $diff.Add("$Where Option ${k}: nur in der Zusammenfassung ($($sm[$k])), nicht in der Export-XML.") }
+            elseif ($inX -and -not $inS) { $diff.Add("$Where Option ${k}: nur in der Export-XML ($($XmlOptions[$k])), nicht in der Zusammenfassung.") }
+            elseif ($inS -and $inX -and (ConvertTo-SmDhcpOptionTokens $sm[$k]) -cne (ConvertTo-SmDhcpOptionTokens $XmlOptions[$k])) { $diff.Add("$Where Option ${k}: Zusammenfassung '$($sm[$k])', Export-XML '$($XmlOptions[$k])'.") }
+        }
+    }
+    & $cmp 'Server' $Summary.ServerOptions4 $Facts.ServerOptions
+    foreach ($s in $Summary.Scopes4) {
+        $f = @($Facts.Scopes4 | Where-Object { $_.Id -eq $s.ScopeId })
+        if ($f.Count) { & $cmp ('Bereich ' + $s.ScopeId + ':') $s.Options $f[0].Options }
+    }
+    $diff.ToArray()   # Aufrufer packen das Ergebnis in @(), eine leere Liste liefert dann nichts
+}
+
 # ---------------------------------------------------------------- Vergleich
 
 function ConvertTo-SmDhcpMap {
@@ -298,6 +457,41 @@ function Get-SmDhcpOptionMap {
     ConvertTo-SmDhcpMap $Options { param($o) 'Option ' + $o.Id } { param($o) $o.Value } { param($o) ('Option {0} {1}' -f $o.Id, $o.Name).Trim() }
 }
 
+function ConvertTo-SmDhcpClientKey {
+    param([string]$Id)
+    ([regex]::Replace([string]$Id, '[-:\s.]', '')).ToLowerInvariant()
+}
+
+function Compare-SmDhcpLeaseList {
+    <#
+    Vergleicht Leases je Adresse: fehlt nachher, neu nachher, anders (die Adresse gehoert nachher einem anderen Client), sonst gleich.
+    Groessenlimit: Counter.N zaehlt die erzeugten Zeilen (hoechstens SmDhcpMaxLeaseRows insgesamt), der Rest geht in Counter.Skipped.
+    #>
+    param($Rows, [string]$Area, $Before, $After, [hashtable]$Counter, [switch]$IncludeEqual)
+    $bm = @{}; foreach ($l in @($Before)) { $bm[[string]$l.Ip] = [string]$l.ClientId }
+    $am = @{}; foreach ($l in @($After)) { $am[[string]$l.Ip] = [string]$l.ClientId }
+    $diffs = New-Object System.Collections.Generic.List[string]; $equal = New-Object System.Collections.Generic.List[string]
+    foreach ($ip in $bm.Keys) {
+        if (-not $am.ContainsKey($ip)) { $diffs.Add($ip) }
+        elseif ((ConvertTo-SmDhcpClientKey $bm[$ip]) -ne (ConvertTo-SmDhcpClientKey $am[$ip])) { $diffs.Add($ip) }
+        else { $equal.Add($ip) }
+    }
+    foreach ($ip in $am.Keys) { if (-not $bm.ContainsKey($ip)) { $diffs.Add($ip) } }
+    $order = { try { [version]$_ } catch { [version]'0.0' } }
+    $list = @($diffs | Sort-Object $order)
+    if ($IncludeEqual) { $list += @($equal | Sort-Object $order) }
+    foreach ($ip in $list) {
+        if ($Counter.N -ge $script:SmDhcpMaxLeaseRows) { $Counter.Skipped++; continue }
+        $hasB = $bm.ContainsKey($ip); $hasA = $am.ContainsKey($ip)
+        if ($hasB -and -not $hasA) { $res = 'fehlt nachher'; $hint = 'Lease nachher nicht vorhanden (Leases laufen ab und aendern sich laufend).' }
+        elseif ($hasA -and -not $hasB) { $res = 'neu nachher'; $hint = 'Lease nur nachher vorhanden (Leases laufen ab und aendern sich laufend).' }
+        elseif ((ConvertTo-SmDhcpClientKey $bm[$ip]) -ne (ConvertTo-SmDhcpClientKey $am[$ip])) { $res = 'anders'; $hint = 'Die Adresse gehoert nachher einem anderen Client.' }
+        else { $res = 'gleich'; $hint = '' }
+        $Counter.N++
+        $Rows.Add([pscustomobject]@{ Bereich = $Area; Kategorie = 'Lease'; Element = $ip; Vorher = $(if ($hasB) { $bm[$ip] } else { '' }); Nachher = $(if ($hasA) { $am[$ip] } else { '' }); Ergebnis = $res; Hinweis = $hint })
+    }
+}
+
 function Compare-SmDhcpSummary {
     <#
     .SYNOPSIS
@@ -308,6 +502,7 @@ function Compare-SmDhcpSummary {
     param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After, [switch]$IncludeEqual)
     $rows = New-Object System.Collections.Generic.List[object]
     $inc = [bool]$IncludeEqual
+    $leaseCount = @{ N = 0; Skipped = 0 }; $noteDone = $false
     # IPv4-Bereiche
     $bs = ConvertTo-SmDhcpMap $Before.Scopes4 { param($s) $s.ScopeId } { param($s) $s }
     $as = ConvertTo-SmDhcpMap $After.Scopes4 { param($s) $s.ScopeId } { param($s) $s }
@@ -325,6 +520,8 @@ function Compare-SmDhcpSummary {
         Compare-SmDhcpMap $rows $label 'Ausschluss' (ConvertTo-SmDhcpMap $x.Exclusions { param($r) $r.Start + '-' + $r.End } { param($r) 'vorhanden' }) (ConvertTo-SmDhcpMap $y.Exclusions { param($r) $r.Start + '-' + $r.End } { param($r) 'vorhanden' }) -IncludeEqual:$inc
         Compare-SmDhcpMap $rows $label 'Richtlinie' (ConvertTo-SmDhcpMap $x.Policies { param($p) $p } { param($p) 'vorhanden' }) (ConvertTo-SmDhcpMap $y.Policies { param($p) $p } { param($p) 'vorhanden' }) -IncludeEqual:$inc
         Compare-SmDhcpMap $rows $label 'Leases' @{ anzahl = @{ Value = [string]$x.Leases; Label = 'Anzahl' } } @{ anzahl = @{ Value = [string]$y.Leases; Label = 'Anzahl' } } 'Leases aendern sich laufend, eine kleine Abweichung kann normal sein.' -IncludeEqual:$inc
+        if ($Before.LeasesIncluded -and $After.LeasesIncluded) { Compare-SmDhcpLeaseList $rows $label $x.LeaseList $y.LeaseList $leaseCount -IncludeEqual:$inc }
+        elseif (($Before.LeasesIncluded -or $After.LeasesIncluded) -and -not $noteDone) { $noteDone = $true; $rows.Add([pscustomobject]@{ Bereich = 'Server'; Kategorie = 'Lease'; Element = 'Leases je Adresse'; Vorher = $(if ($Before.LeasesIncluded) { 'enthalten' } else { 'ohne Leases exportiert' }); Nachher = $(if ($After.LeasesIncluded) { 'enthalten' } else { 'ohne Leases exportiert' }); Ergebnis = 'anders'; Hinweis = 'Eine Seite hat keine Lease-Liste: je Adresse wird nicht verglichen, nur die Anzahl.' }) }
     }
     # IPv6-Bereiche
     $b6 = ConvertTo-SmDhcpMap $Before.Scopes6 { param($s) $s.Prefix } { param($s) $s }
@@ -343,6 +540,7 @@ function Compare-SmDhcpSummary {
         Compare-SmDhcpMap $rows $label 'Ausschluss' (ConvertTo-SmDhcpMap $x.Exclusions { param($r) $r.Start + '-' + $r.End } { param($r) 'vorhanden' }) (ConvertTo-SmDhcpMap $y.Exclusions { param($r) $r.Start + '-' + $r.End } { param($r) 'vorhanden' }) -IncludeEqual:$inc
         Compare-SmDhcpMap $rows $label 'Leases' @{ anzahl = @{ Value = [string]$x.Leases; Label = 'Anzahl' } } @{ anzahl = @{ Value = [string]$y.Leases; Label = 'Anzahl' } } 'Leases aendern sich laufend, eine kleine Abweichung kann normal sein.' -IncludeEqual:$inc
     }
+    if ($leaseCount.Skipped -gt 0) { $rows.Add([pscustomobject]@{ Bereich = 'Server'; Kategorie = 'Lease'; Element = ('weitere {0} Lease-Unterschiede nicht gezeigt' -f $leaseCount.Skipped); Vorher = ''; Nachher = ''; Ergebnis = 'anders'; Hinweis = ('Anzeige auf {0} Lease-Zeilen begrenzt.' -f $script:SmDhcpMaxLeaseRows) }) }
     # Serverebene
     Compare-SmDhcpMap $rows 'Server' 'Option' (Get-SmDhcpOptionMap $Before.ServerOptions4) (Get-SmDhcpOptionMap $After.ServerOptions4) -IncludeEqual:$inc
     Compare-SmDhcpMap $rows 'Server (v6)' 'Option' (Get-SmDhcpOptionMap $Before.ServerOptions6) (Get-SmDhcpOptionMap $After.ServerOptions6) -IncludeEqual:$inc
@@ -355,7 +553,7 @@ function Compare-SmDhcpSummary {
     Compare-SmDhcpMap $rows 'Server' 'DNS-Update' (ConvertTo-SmDhcpMap $Before.DnsUpdate { param($d) ($d.Scope + ' ' + $d.Name).Trim() } { param($d) $d.Value }) (ConvertTo-SmDhcpMap $After.DnsUpdate { param($d) ($d.Scope + ' ' + $d.Name).Trim() } { param($d) $d.Value }) -IncludeEqual:$inc
     Compare-SmDhcpMap $rows 'Server' 'Bindung' (ConvertTo-SmDhcpMap $Before.Bindings { param($d) $d.Interface } { param($d) $d.State }) (ConvertTo-SmDhcpMap $After.Bindings { param($d) $d.Interface } { param($d) $d.State }) 'Bindungen gehoeren zum Server (Netzwerkkarten) und koennen abweichen.' -IncludeEqual:$inc
     Compare-SmDhcpMap $rows 'Server' 'Autorisierung' @{ ad = @{ Value = [string]$Before.Authorized; Label = 'In AD autorisiert' } } @{ ad = @{ Value = [string]$After.Authorized; Label = 'In AD autorisiert' } } 'Der neue Server wird erst nach dem Import autorisiert.' -IncludeEqual:$inc
-    , $rows.ToArray()
+    $rows.ToArray()   # kein Komma: Aufrufer packen das Ergebnis in @() (sonst waere es ein Array im Array)
 }
 
 function Get-SmDhcpDiffText {

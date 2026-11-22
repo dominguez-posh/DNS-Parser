@@ -16,20 +16,22 @@
         <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
             <StackPanel>
                 <TextBlock Text="Alter Server: Export" Style="{DynamicResource CardTitle}"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,10" TextWrapping="Wrap" Text="Exportiert Bereiche, Optionen, Reservierungen und Leases (Export-DhcpServer -Leases) und legt eine Zusammenfassung dazu (Bereiche v4 und v6, Optionen, Reservierungen, Ausschlüsse, Leases, Failover, Richtlinien, Filter, DNS-Update, Bindungen). Beides kommt als ZIP in den Tauschordner. Die Prüfsumme bitte am neuen Server vergleichen."/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,10" TextWrapping="Wrap" Text="Exportiert Bereiche, Optionen, Reservierungen und Leases (Export-DhcpServer -Leases) und legt eine Zusammenfassung dazu (Bereiche v4 und v6, Optionen, Reservierungen, Ausschlüsse, Leases, Failover, Richtlinien, Filter, DNS-Update, Bindungen). Beides kommt als ZIP in den Tauschordner. Die SHA256 mit &quot;SHA256 kopieren&quot; holen und am neuen Server einfügen."/>
+                <CheckBox x:Name="ChkDhcpNoLeases" Margin="0,0,0,10"><TextBlock TextWrapping="Wrap" Text="Ohne Leases exportieren (keine MAC-Adressen und Hostnamen der Geräte, personenbezogene Daten). Standard: mit Leases." Foreground="{DynamicResource Text}"/></CheckBox>
                 <StackPanel Orientation="Horizontal">
                     <Button x:Name="BtnDhcpExport" Content="Exportieren und hochladen" Tag="&#xE898;" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtDhcpExport" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
                 </StackPanel>
                 <ProgressBar x:Name="PrgDhcpExport" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
                 <TextBox x:Name="TxtDhcpExportSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" IsReadOnly="True" TextWrapping="Wrap"/>
+                <Button x:Name="BtnDhcpCopySha" Content="SHA256 kopieren" IsEnabled="False" HorizontalAlignment="Left" Margin="0,8,0,0"/>
             </StackPanel>
         </Border>
 
         <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
             <StackPanel>
                 <TextBlock Text="Neuer Server: Export holen und importieren" Style="{DynamicResource CardTitle}"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,10" TextWrapping="Wrap" Text="1. Exporte suchen, auswählen, herunterladen. 2. Die Prüfsumme mit der Anzeige am alten Server vergleichen und bestätigen. 3. Bereiche wählen und importieren."/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,10" TextWrapping="Wrap" Text="1. Exporte suchen, auswählen, herunterladen. 2. Die vollständige SHA256 vom alten Server einfügen. 3. Bereiche wählen und importieren."/>
                 <StackPanel Orientation="Horizontal">
                     <Button x:Name="BtnDhcpFind" Content="Exporte im Tauschordner suchen" Tag="&#xE721;" Margin="0,0,10,0"/>
                     <Button x:Name="BtnDhcpDownload" Content="Herunterladen" IsEnabled="False"/>
@@ -38,7 +40,9 @@
                     <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Margin="8,4" Foreground="{DynamicResource Text}"/></DataTemplate></ListBox.ItemTemplate>
                 </ListBox>
                 <TextBox x:Name="TxtDhcpDlSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" IsReadOnly="True" TextWrapping="Wrap"/>
-                <CheckBox x:Name="ChkDhcpShaOk" Margin="0,8,0,0" IsEnabled="False"><TextBlock Text="Die Prüfsumme ist gleich der Anzeige am alten Server" Foreground="{DynamicResource Text}"/></CheckBox>
+                <TextBlock Text="SHA256 vom alten Server (dort mit „SHA256 kopieren“ holen und hier einfügen)" Style="{DynamicResource Hint}" Margin="0,8,0,2" TextWrapping="Wrap"/>
+                <TextBox x:Name="TxtDhcpShaIn" IsEnabled="False" FontFamily="{DynamicResource MonoFont}" FontSize="12" MaxLength="200" AutomationProperties.Name="SHA256 vom alten Server"/>
+                <TextBlock x:Name="TxtDhcpShaState" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                 <Button x:Name="BtnDhcpOpen" Content="Export prüfen und Bereiche laden" IsEnabled="False" HorizontalAlignment="Left" Margin="0,8,0,0"/>
 
                 <StackPanel x:Name="BoxDhcpImport" Margin="0,14,0,0" Visibility="Collapsed">
@@ -65,6 +69,7 @@
                     <Button x:Name="BtnDhcpAuth" Content="In AD autorisieren …" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtDhcpAuth" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}" TextWrapping="Wrap"/>
                 </StackPanel>
+                <CheckBox x:Name="ChkDhcpAfterNoLeases" Margin="0,10,0,0"><TextBlock TextWrapping="Wrap" Text="Ohne Lease-Liste hochladen (keine MAC-Adressen; verglichen wird dann nur die Anzahl der Leases)" Foreground="{DynamicResource Text}"/></CheckBox>
                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                     <Button x:Name="BtnDhcpAfter" Content="Stand des neuen Servers hochladen" Tag="&#xE898;" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtDhcpAfter" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}" TextWrapping="Wrap"/>

@@ -29,7 +29,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $root 'server\SmDhcpServer.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'))
 $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'))
-$dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'), (Join-Path $root 'server\SmDhcpServer.ps1'))
+$dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'), (Join-Path $root 'server\SmDhcpServer.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
@@ -74,7 +74,7 @@ $ui = $w.Ui
 Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'TxtFiles', 'BtnUpload', 'TxtProgress', 'PrgUpload', 'TxtLog',
     'TxtDnsState', 'TxtDnsDetail', 'BtnDnsRefresh', 'BoxDnsEnable', 'TxtDnsPath', 'TxtDnsMax', 'BtnDnsEnable', 'BoxDnsOn', 'BtnDnsDisable', 'BoxDnsLogs', 'TxtDnsLogInfo', 'BtnDnsUpload', 'TxtDnsProgress', 'PrgDns',
     'NavStart', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
-Test-SmWindowNames @('BtnDhcpCheck', 'TxtDhcpCheck', 'BtnDhcpExport', 'TxtDhcpExport', 'PrgDhcpExport', 'TxtDhcpExportSha', 'BtnDhcpFind', 'BtnDhcpDownload', 'LstDhcpExports', 'TxtDhcpDlSha', 'ChkDhcpShaOk', 'BtnDhcpOpen',
+Test-SmWindowNames @('BtnDhcpCheck', 'TxtDhcpCheck', 'BtnDhcpExport', 'TxtDhcpExport', 'PrgDhcpExport', 'TxtDhcpExportSha', 'ChkDhcpNoLeases', 'BtnDhcpCopySha', 'ChkDhcpAfterNoLeases', 'TxtDhcpShaIn', 'TxtDhcpShaState', 'BtnDhcpFind', 'BtnDhcpDownload', 'LstDhcpExports', 'TxtDhcpDlSha', 'BtnDhcpOpen',
     'BoxDhcpImport', 'TxtDhcpInfo', 'RdoDhcpAll', 'RdoDhcpSel', 'LstDhcpScopes', 'ChkDhcpLeases', 'BtnDhcpImport', 'TxtDhcpImport', 'BtnDhcpAuth', 'TxtDhcpAuth', 'BtnDhcpAfter', 'TxtDhcpAfter', 'BtnDhcpOldList', 'LstDhcpOldScopes', 'BtnDhcpDeactivate')
 if ($ParseOnly) { 'PARSE OK'; return }
 

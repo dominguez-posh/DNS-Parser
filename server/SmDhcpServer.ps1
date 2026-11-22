@@ -15,6 +15,7 @@
 #>
 
 $script:SmDhcpAuditPath = $null   # Standard: %ProgramData%\ServerMigration\dhcp-protokoll.log (Tests setzen einen eigenen Pfad)
+# Protokoll- und Sicherungsordner werden mit Protect-SmDnsStateDir (server\SmDnsServer.ps1) gehaertet, keine eigene Kopie. Die Datei muss vor dieser geladen sein.
 
 function Test-SmDhcpAdmin {
     try { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $false }
@@ -33,12 +34,17 @@ function Write-SmDhcpAudit {
     $clean = [regex]::Replace($Text, '(?i)\b(?:https?|ftp)://\S+', '<Adresse>')
     $line = 'DHCP {0}: {1}' -f $Action, $clean
     try {
-        $path = if ($script:SmDhcpAuditPath) { $script:SmDhcpAuditPath } else { Join-Path (Join-Path $env:ProgramData 'ServerMigration') 'dhcp-protokoll.log' }
+        $path = if ($script:SmDhcpAuditPath) { $script:SmDhcpAuditPath } else { Join-Path (Get-SmDnsStateDir) 'dhcp-protokoll.log' }
         $dir = Split-Path -Parent $path
-        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        Protect-SmDnsStateDir -Path $dir   # Ordner immer haerten und pruefen (Administratoren und SYSTEM), sonst wird nicht geschrieben
         Add-Content -LiteralPath $path -Value ('{0:yyyy-MM-dd HH:mm:ss}  {1}\{2}  {3}' -f (Get-Date), $env:USERDOMAIN, $env:USERNAME, $line) -Encoding UTF8
     }
-    catch { }
+    catch {
+        # Ein Schreibfehler im Protokoll wird angezeigt, nicht still geschluckt
+        $warn = 'DHCP Protokoll: Die Protokollzeile konnte nicht geschrieben werden: ' + [regex]::Replace($_.Exception.Message, '(?i)\b(?:https?|ftp)://\S+', '<Adresse>')
+        if ($Log) { & $Log $warn }
+        Write-Warning $warn
+    }
     if ($Log) { & $Log $line }
     $line
 }
@@ -136,8 +142,9 @@ function Get-SmDhcpSummary {
         Liest den Stand des lokalen DHCP-Servers: Bereiche (v4 und v6) mit Optionen, Reservierungen, Ausschluessen und Anzahl der Leases,
         Optionen auf Serverebene, Failover-Beziehungen, Richtlinien, Filter, DNS-Update-Einstellungen und Bindungen (Format SmDhcpSummary 1).
     #>
-    param([scriptblock]$Log)
+    param([scriptblock]$Log, [switch]$NoLeases)
     $err = New-Object System.Collections.Generic.List[string]
+    $leaseTotal = 0
     $s4 = New-Object System.Collections.Generic.List[object]
     foreach ($s in (Invoke-SmDhcpSafe $err 'Bereiche v4' { Get-DhcpServerv4Scope -ErrorAction Stop })) {
         $id = $s.ScopeId.ToString()
@@ -145,12 +152,21 @@ function Get-SmDhcpSummary {
         $opt = @(ConvertTo-SmDhcpOptionRows (Invoke-SmDhcpSafe $err "Optionen $id" { Get-DhcpServerv4OptionValue -ScopeId $id -ErrorAction Stop }))
         $res = @(Invoke-SmDhcpSafe $err "Reservierungen $id" { Get-DhcpServerv4Reservation -ScopeId $id -ErrorAction Stop } | ForEach-Object { [ordered]@{ Ip = $_.IPAddress.ToString(); ClientId = [string]$_.ClientId; Name = [string]$_.Name } })
         $exc = @(Invoke-SmDhcpSafe $err "Ausschluesse $id" { Get-DhcpServerv4ExclusionRange -ScopeId $id -ErrorAction Stop } | ForEach-Object { [ordered]@{ Start = $_.StartRange.ToString(); End = $_.EndRange.ToString() } })
-        $leases = @(Invoke-SmDhcpSafe $err "Leases $id" { Get-DhcpServerv4Lease -ScopeId $id -AllLeases -ErrorAction Stop }).Count
+        $ll = @(Invoke-SmDhcpSafe $err "Leases $id" { Get-DhcpServerv4Lease -ScopeId $id -AllLeases -ErrorAction Stop })
+        $leases = $ll.Count
+        $leaseList = New-Object System.Collections.Generic.List[object]
+        if (-not $NoLeases) {
+            # je Adresse: nur IP und Client-Kennung (MAC), keine Hostnamen; begrenzt, damit die Datei lesbar bleibt
+            foreach ($l in $ll) {
+                if ($leaseList.Count -ge $script:SmDhcpMaxLeasesPerScope -or $leaseTotal -ge 300000) { $err.Add("Leases ${id}: Liste gekuerzt (Grenze erreicht)"); break }
+                $leaseList.Add([ordered]@{ Ip = $l.IPAddress.ToString(); ClientId = [string]$l.ClientId }); $leaseTotal++
+            }
+        }
         $pol = @(Invoke-SmDhcpSafe $err "Richtlinien $id" { Get-DhcpServerv4Policy -ScopeId $id -ErrorAction Stop } | ForEach-Object { [string]$_.Name })
         $s4.Add([ordered]@{
                 ScopeId = $id; Name = [string]$s.Name; Mask = $(if ($s.SubnetMask) { $s.SubnetMask.ToString() } else { '' })
                 Start = $(if ($s.StartRange) { $s.StartRange.ToString() } else { '' }); End = $(if ($s.EndRange) { $s.EndRange.ToString() } else { '' })
-                State = [string]$s.State; LeaseDuration = [string]$s.LeaseDuration; Leases = $leases
+                State = [string]$s.State; LeaseDuration = [string]$s.LeaseDuration; Leases = $leases; LeaseList = $leaseList.ToArray()
                 Options = $opt; Reservations = $res; Exclusions = $exc; Policies = $pol
             })
     }
@@ -186,7 +202,7 @@ function Get-SmDhcpSummary {
     $bind = @(Invoke-SmDhcpSafe $err 'Bindungen' { Get-DhcpServerv4Binding -ErrorAction Stop } | ForEach-Object { [ordered]@{ Interface = [string]$_.InterfaceAlias; Ip = [string]$_.IPAddress; State = [string]$_.BindingState } })
     [ordered]@{
         Format = 'SmDhcpSummary'; Version = 1; Server = [string]$env:COMPUTERNAME; Created = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-        Authorized = ((Get-SmDhcpAuthState) -eq $true)
+        Authorized = ((Get-SmDhcpAuthState) -eq $true); LeasesIncluded = (-not $NoLeases)
         Scopes4 = $s4.ToArray(); Scopes6 = $s6.ToArray()
         ServerOptions4 = @(ConvertTo-SmDhcpOptionRows (Invoke-SmDhcpSafe $err 'Serveroptionen v4' { Get-DhcpServerv4OptionValue -ErrorAction Stop }))
         ServerOptions6 = @(ConvertTo-SmDhcpOptionRows (Invoke-SmDhcpSafe $err 'Serveroptionen v6' { Get-DhcpServerv6OptionValue -ErrorAction Stop }))
@@ -208,16 +224,16 @@ function Write-SmDhcpSummaryFile {
 
 function New-SmDhcpExport {
     <# Export-DhcpServer -File -Leases plus Zusammenfassung, beides in ein ZIP (dhcp-export.xml, dhcp-summary.json). Liefert Pfad, Name, SHA256, Laenge und die Zusammenfassung. #>
-    param([Parameter(Mandatory)][string]$WorkDir, [scriptblock]$Log)
+    param([Parameter(Mandatory)][string]$WorkDir, [scriptblock]$Log, [switch]$NoLeases)
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $xml = Join-Path $WorkDir $script:SmDhcpXmlEntry
     $json = Join-Path $WorkDir $script:SmDhcpSummaryEntry
-    if ($Log) { & $Log 'Export-DhcpServer mit Leases ...' }
-    Export-DhcpServer -File $xml -Leases -ErrorAction Stop
+    if ($Log) { & $Log $(if ($NoLeases) { 'Export-DhcpServer ohne Leases ...' } else { 'Export-DhcpServer mit Leases ...' }) }
+    if ($NoLeases) { Export-DhcpServer -File $xml -ErrorAction Stop } else { Export-DhcpServer -File $xml -Leases -ErrorAction Stop }
     if (-not (Test-Path -LiteralPath $xml) -or (Get-Item -LiteralPath $xml).Length -eq 0) { throw 'Export-DhcpServer hat keine Datei geschrieben.' }
     [void](Test-SmDhcpXmlSafe -Path $xml)
     if ($Log) { & $Log 'Lese die Zusammenfassung (Bereiche, Optionen, Reservierungen, Failover ...)' }
-    $summary = Write-SmDhcpSummaryFile -Summary (Get-SmDhcpSummary -Log $Log) -Path $json
+    $summary = Write-SmDhcpSummaryFile -Summary (Get-SmDhcpSummary -Log $Log -NoLeases:$NoLeases) -Path $json
     $name = 'DHCP-Export-{0}-{1}.zip' -f (Get-SmDhcpHostName), (Get-Date -Format 'yyyyMMdd-HHmmss')
     $zipPath = Join-Path $WorkDir $name
     $zip = [IO.Compression.ZipFile]::Open($zipPath, 'Create')
@@ -238,17 +254,25 @@ function Get-SmSha256Local {
     -join ($h | ForEach-Object { $_.ToString('X2') })
 }
 
+function Get-SmSha256Bytes {
+    <# SHA256 von Bytes im Speicher (voll, Grossbuchstaben). #>
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
+    -join ($h | ForEach-Object { $_.ToString('X2') })
+}
+
 function Publish-SmDhcpExport {
     <# Alter Server: Vorpruefung, Export, ZIP in den Tauschordner (grosse Dateien in Teilen). Liefert Name, Sha256, Laenge und Zusammenfassung. #>
-    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP)
+    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP, [switch]$NoLeases)
     $pre = Test-SmDhcpPrecheck -Mode Export
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
     $work = New-SmDhcpTemp -TempRoot $TempRoot
     try {
-        $exp = New-SmDhcpExport -WorkDir $work -Log $Log
+        $exp = New-SmDhcpExport -WorkDir $work -Log $Log -NoLeases:$NoLeases
         & $Log ('ZIP gepackt: {0} ({1:N1} MB), SHA256 {2}' -f $exp.Name, ($exp.Length / 1MB), $exp.Sha256)
         $remote = Send-SmShareFile -Share $Share -Path $exp.Path -Progress $Progress
-        [void](Write-SmDhcpAudit -Action 'Export' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6' -f $exp.Name, $exp.Sha256, @($exp.Summary.Scopes4).Count, @($exp.Summary.Scopes6).Count) -Log $Log)
+        [void](Write-SmDhcpAudit -Action 'Export' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $exp.Name, $exp.Sha256, @($exp.Summary.Scopes4).Count, @($exp.Summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
         [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $exp.Sha256; Summary = $exp.Summary }
     }
     finally { Remove-SmDhcpTemp -Dir $work -TempRoot $TempRoot }
@@ -256,17 +280,17 @@ function Publish-SmDhcpExport {
 
 function Publish-SmDhcpAfter {
     <# Neuer Server (nach dem Import): gleiche Zusammenfassung erzeugen und als DHCP-Nachher-*.json hochladen. #>
-    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP)
+    param([Parameter(Mandatory)]$Share, [scriptblock]$Progress, [scriptblock]$Log = { param($m) }, [string]$TempRoot = $env:TEMP, [switch]$NoLeases)
     $pre = Test-SmDhcpPrecheck -Mode Export
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
     $work = New-SmDhcpTemp -TempRoot $TempRoot
     try {
         $name = 'DHCP-Nachher-{0}-{1}.json' -f (Get-SmDhcpHostName), (Get-Date -Format 'yyyyMMdd-HHmmss')
         $path = Join-Path $work $name
-        $summary = Write-SmDhcpSummaryFile -Summary (Get-SmDhcpSummary -Log $Log) -Path $path
+        $summary = Write-SmDhcpSummaryFile -Summary (Get-SmDhcpSummary -Log $Log -NoLeases:$NoLeases) -Path $path
         $sha = Get-SmSha256Local $path
         $remote = Send-SmShareFile -Share $Share -Path $path -Progress $Progress
-        [void](Write-SmDhcpAudit -Action 'Zusammenfassung hochgeladen' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6' -f $name, $sha, @($summary.Scopes4).Count, @($summary.Scopes6).Count) -Log $Log)
+        [void](Write-SmDhcpAudit -Action 'Zusammenfassung hochgeladen' -Text ('{0}, SHA256 {1}, {2} Bereiche v4, {3} v6, {4}' -f $name, $sha, @($summary.Scopes4).Count, @($summary.Scopes6).Count, $(if ($NoLeases) { 'ohne Leases' } else { 'mit Leases' })) -Log $Log)
         [pscustomobject]@{ Name = $remote.Name; Length = $remote.Length; Sha256 = $sha; Summary = $summary }
     }
     finally { Remove-SmDhcpTemp -Dir $work -TempRoot $TempRoot }
@@ -274,26 +298,76 @@ function Publish-SmDhcpAfter {
 
 # ---------------------------------------------------------------- Import (neuer Server)
 
+function Get-SmDhcpImportRoot {
+    <# Arbeitsordner des Imports: unter dem gehaerteten Ordner ProgramData\ServerMigration (nie unter %TEMP%, das auch ein nicht erhoehter Prozess des Benutzers beschreiben kann). #>
+    Join-Path (Get-SmDnsStateDir) 'Dhcp'
+}
+
+function Assert-SmDhcpNoReparse {
+    <# Bricht ab, wenn Ordner oder Datei eine Verknuepfung (ReparsePoint) ist. #>
+    param([Parameter(Mandatory)][string[]]$Path)
+    foreach ($p in $Path) {
+        if (-not (Test-Path -LiteralPath $p)) { throw "Fehlt: $p" }
+        if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Verknuepfung (ReparsePoint) statt Datei oder Ordner, abgebrochen: $p" }
+    }
+}
+
+function New-SmDhcpImportDir {
+    <# Neuer Ordner Import-<GUID> im gehaerteten Importordner (Protect-SmDnsStateDir auf jeder Ebene, ReparsePoint-Pruefung). #>
+    param([string]$ImportRoot)
+    if (-not $ImportRoot) { Protect-SmDnsStateDir -Path (Get-SmDnsStateDir); $ImportRoot = Get-SmDhcpImportRoot }
+    Protect-SmDnsStateDir -Path $ImportRoot
+    $d = Join-Path ([IO.Path]::GetFullPath($ImportRoot)) ('Import-' + [guid]::NewGuid().ToString('N'))
+    Protect-SmDnsStateDir -Path $d
+    Assert-SmDhcpNoReparse -Path $d
+    $d
+}
+
+function Close-SmDhcpImport {
+    <# Raeumt nach dem Import auf: Handles schliessen, dann den Import-<GUID>-Ordner loeschen (nur dieser Name, Pfad per GetFullPath, keine Verknuepfung). #>
+    param($Down, $Opened)
+    foreach ($h in @($(if ($Opened) { $Opened.XmlHandle }), $(if ($Down) { $Down.Handle }))) { if ($h) { try { $h.Dispose() } catch { } } }
+    $dir = if ($Down) { $Down.Dir } elseif ($Opened) { Split-Path -Parent $Opened.XmlPath }
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return }
+    $full = [IO.Path]::GetFullPath($dir)
+    if ((Split-Path -Leaf $full) -notmatch '^Import-[0-9a-f]{32}$') { return }
+    if ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Receive-SmDhcpExport {
-    <# Laedt ein DHCP-Export-ZIP in einen neuen Zufallsordner und liefert den SHA256. Entpackt wird noch nichts. #>
-    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)]$Remote, [string]$TempRoot = $env:TEMP)
+    <#
+    Laedt ein DHCP-Export-ZIP direkt in einen neuen, gehaerteten Ordner (Import-<GUID> unter ProgramData\ServerMigration\Dhcp) und liefert den SHA256.
+    Der SHA256 wird ueber genau die Bytes gebildet, die dort liegen; das Handle (FileShare.Read) bleibt bis Close-SmDhcpImport offen,
+    damit niemand die Datei schreiben oder ersetzen kann. Entpackt wird noch nichts.
+    #>
+    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)]$Remote, [Alias('TempRoot')][string]$ImportRoot)
     if ((Get-SmDhcpFileKind $Remote.Name) -ne 'Export') { throw 'Das ist kein DHCP-Export (DHCP-Export-<Server>-<Datum>.zip).' }
     if ([long]$Remote.Length -gt $script:SmDhcpMaxZipBytes) { throw 'Das ZIP ist groesser als erlaubt.' }
-    $dir = New-SmDhcpTemp -TempRoot $TempRoot
+    $dir = New-SmDhcpImportDir -ImportRoot $ImportRoot
+    $h = $null
     try {
         $zip = Join-Path $dir 'export.zip'
-        Receive-SmShareFile -Share $Share -Name $Remote.Name -OutFile $zip
-        $len = (Get-Item -LiteralPath $zip).Length
+        Receive-SmShareFile -Share $Share -Name $Remote.Name -OutFile $zip -MaxBytes $script:SmDhcpMaxZipBytes
+        Assert-SmDhcpNoReparse -Path $dir, $zip
+        $h = New-Object IO.FileStream($zip, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $len = $h.Length
         if ($len -gt $script:SmDhcpMaxZipBytes -or $len -ne [long]$Remote.Length) { throw 'Die heruntergeladene Datei hat nicht die erwartete Groesse.' }
-        [pscustomobject]@{ Dir = $dir; ZipPath = $zip; Name = $Remote.Name; Sha256 = (Get-SmSha256Local $zip); Length = $len }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha.ComputeHash($h) } finally { $sha.Dispose() }
+        $h.Position = 0
+        [pscustomobject]@{ Dir = $dir; ZipPath = $zip; Name = $Remote.Name; Sha256 = (-join ($hash | ForEach-Object { $_.ToString('X2') })); Length = $len; Handle = $h }
     }
-    catch { Remove-SmDhcpTemp -Dir $dir -TempRoot $TempRoot; throw }
+    catch { if ($h) { $h.Dispose() }; Close-SmDhcpImport -Down ([pscustomobject]@{ Dir = $dir; Handle = $null }); throw }
 }
 
 function Open-SmDhcpExport {
     <# Entpackt genau die zwei erwarteten Eintraege (feste Namen, begrenzte Groesse), prueft die XML (keine DTD) und die Zusammenfassung. #>
-    param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$Dir)
+    param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$ExpectedSha)
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    # Ohne vollstaendig passende Pruefsumme (am alten Server angezeigt, hier eingegeben) wird nichts entpackt.
+    if (-not (Test-SmDhcpShaMatch -Expected (Get-SmSha256Local $ZipPath) -Entered $ExpectedSha)) { throw 'Die eingegebene Pruefsumme passt nicht zur heruntergeladenen Datei. Nichts geoeffnet.' }
+    Assert-SmDhcpNoReparse -Path $Dir, $ZipPath
     $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
     $xmlPath = Join-Path $Dir $script:SmDhcpXmlEntry
     try {
@@ -314,9 +388,18 @@ function Open-SmDhcpExport {
         finally { $dst.Dispose(); $src.Dispose() }
     }
     finally { $zip.Dispose() }
-    [void](Test-SmDhcpXmlSafe -Path $xmlPath)
-    $summary = Read-SmDhcpSummaryFile -Path $ZipPath
-    [pscustomobject]@{ XmlPath = $xmlPath; Summary = $summary }
+    # Handle auf die XML (FileShare.Read) bis Close-SmDhcpImport: danach kann niemand sie schreiben oder ersetzen, auch nicht waehrend Import-DhcpServer laeuft.
+    Assert-SmDhcpNoReparse -Path $xmlPath
+    $xh = New-Object IO.FileStream($xmlPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        [void](Test-SmDhcpXmlSafe -Path $xmlPath)
+        $summary = Read-SmDhcpSummaryFile -Path $ZipPath
+        # Importiert wird die XML, nicht die Zusammenfassung: Bereiche und Optionen 3/6/15/44/252 kommen aus der XML und muessen zur Zusammenfassung passen.
+        $facts = Read-SmDhcpXmlFacts -Path $xmlPath
+        $mismatch = @(Compare-SmDhcpSummaryXml -Summary $summary -Facts $facts)
+    }
+    catch { $xh.Dispose(); throw }
+    [pscustomobject]@{ XmlPath = $xmlPath; Summary = $summary; Facts = $facts; Mismatch = $mismatch; XmlHandle = $xh }
 }
 
 function ConvertTo-SmDhcpUInt {
@@ -348,24 +431,33 @@ function Get-SmDhcpImportPlan {
         Blocking: Ueberschneidung mit einem Bereich anderer ID (nicht importierbar). Existing: Bereich mit gleicher ID ist schon da und wird nur mit
         ScopeOverwrite ersetzt, sonst uebersprungen. Der Zielserver "leer oder nicht" steht in TargetEmpty.
     #>
-    param([Parameter(Mandatory)]$Summary, [switch]$All, [string[]]$ScopeIds = @(), [string[]]$Prefixes = @())
+    param([Parameter(Mandatory)]$Summary, [Parameter(Mandatory)]$Facts, [switch]$All, [string[]]$ScopeIds = @(), [string[]]$Prefixes = @())
+    # Die Bereiche kommen aus der Export-XML (Facts), nicht aus der Zusammenfassung. Weichen beide ab, wird nicht importiert.
     $sel4 = @(); $sel6 = @()
-    if ($All) { $sel4 = @($Summary.Scopes4); $sel6 = @($Summary.Scopes6) }
+    if ($All) { $sel4 = @($Facts.Scopes4); $sel6 = @($Facts.Scopes6) }
     else {
-        foreach ($id in $ScopeIds) { $m = @($Summary.Scopes4 | Where-Object { $_.ScopeId -eq $id }); if (-not $m) { throw "Bereich $id steht nicht im Export." }; $sel4 += $m[0] }
-        foreach ($px in $Prefixes) { $m = @($Summary.Scopes6 | Where-Object { $_.Prefix -eq $px }); if (-not $m) { throw "Praefix $px steht nicht im Export." }; $sel6 += $m[0] }
+        foreach ($id in $ScopeIds) { $m = @($Facts.Scopes4 | Where-Object { $_.Id -eq $id }); if (-not $m) { throw "Bereich $id steht nicht in der Export-XML." }; $sel4 += $m[0] }
+        foreach ($px in $Prefixes) { $m = @($Facts.Scopes6 | Where-Object { $_.Id -eq $px }); if (-not $m) { throw "Praefix $px steht nicht in der Export-XML." }; $sel6 += $m[0] }
     }
+    $mismatch = @(Compare-SmDhcpSummaryXml -Summary $Summary -Facts $Facts)
     $local4 = @(Get-DhcpServerv4Scope -ErrorAction Stop)
     $local6 = @(); try { $local6 = @(Get-DhcpServerv6Scope -ErrorAction Stop) } catch { }
     $blocking = New-Object System.Collections.Generic.List[string]; $existing4 = @(); $existing6 = @()
     foreach ($s in $sel4) {
         foreach ($l in $local4) {
             $lid = $l.ScopeId.ToString()
-            if ($lid -eq $s.ScopeId) { $existing4 += $s.ScopeId; continue }
-            if (Test-SmDhcpSubnetOverlap $s.ScopeId $s.Mask $lid $(if ($l.SubnetMask) { $l.SubnetMask.ToString() } else { '' })) { $blocking.Add(('Bereich {0} ueberlappt mit dem vorhandenen Bereich {1}.' -f $s.ScopeId, $lid)) }
+            if ($lid -eq $s.Id) { $existing4 += $s.Id; continue }
+            if (Test-SmDhcpSubnetOverlap $s.Id $s.Mask $lid $(if ($l.SubnetMask) { $l.SubnetMask.ToString() } else { '' })) { $blocking.Add(('Bereich {0} ueberlappt mit dem vorhandenen Bereich {1}.' -f $s.Id, $lid)) }
         }
     }
-    foreach ($s in $sel6) { if (@($local6 | Where-Object { $_.Prefix.ToString() -eq $s.Prefix }).Count) { $existing6 += $s.Prefix } }
+    foreach ($s in $sel6) { if (@($local6 | Where-Object { $_.Prefix.ToString() -eq $s.Id }).Count) { $existing6 += $s.Id } }
+    foreach ($m in $mismatch) { $blocking.Add('Zusammenfassung und Export-XML weichen ab, es wird nichts importiert: ' + $m) }
+    # Was wirklich importiert wird (aus der XML): Serveroptionen und Optionen der gewaehlten Bereiche
+    $preview = New-Object System.Collections.Generic.List[string]
+    $fmt = { param($o) $parts = @($script:SmDhcpCheckedOptions | Where-Object { $o.ContainsKey([string]$_) } | ForEach-Object { '{0}={1}' -f $_, $o[[string]$_] }); if ($parts.Count) { $parts -join '; ' } else { '(keine der Optionen 3, 6, 15, 44, 252)' } }
+    $preview.Add('Serveroptionen (aus der XML): ' + (& $fmt $Facts.ServerOptions))
+    foreach ($s in $sel4) { $preview.Add(('Bereich {0} {1} (aus der XML): {2}' -f $s.Id, $s.Name, (& $fmt $s.Options)).Replace('  ', ' ')) }
+    foreach ($s in $sel6) { $preview.Add(('IPv6-Praefix {0} {1} (aus der XML)' -f $s.Id, $s.Name).Replace('  ', ' ')) }
     $warn = New-Object System.Collections.Generic.List[string]
     $count = $local4.Count + $local6.Count
     if ($count) { $warn.Add(('Der neue Server hat bereits {0} Bereich(e). Vorhandene Bereiche mit gleicher ID werden nur nach ausdruecklicher Bestaetigung ersetzt, sonst uebersprungen.' -f $count)) }
@@ -373,8 +465,9 @@ function Get-SmDhcpImportPlan {
     if ($fn) { $warn.Add($fn) }
     if (-not ($sel4.Count + $sel6.Count)) { $warn.Add('Kein Bereich gewaehlt: nur die Serverkonfiguration (Optionen, Richtlinien, Filter) wird importiert.') }
     [pscustomobject]@{
-        Ok = ($blocking.Count -eq 0); All = [bool]$All; Selected4 = @($sel4 | ForEach-Object { $_.ScopeId }); Selected6 = @($sel6 | ForEach-Object { $_.Prefix })
+        Ok = ($blocking.Count -eq 0); All = [bool]$All; Selected4 = @($sel4 | ForEach-Object { $_.Id }); Selected6 = @($sel6 | ForEach-Object { $_.Id })
         Existing4 = @($existing4); Existing6 = @($existing6); Blocking = $blocking.ToArray(); Warnings = $warn.ToArray(); TargetEmpty = ($count -eq 0); FailoverNote = $fn
+        Preview = $preview.ToArray(); Mismatch = $mismatch
     }
 }
 
@@ -392,9 +485,15 @@ function Invoke-SmDhcpImport {
     $pre = Test-SmDhcpPrecheck -Mode Import
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
     if (-not $Plan.Ok) { throw ('Import nicht moeglich: ' + ($Plan.Blocking -join ' ')) }
+    if (@($Opened.Mismatch).Count) { throw ('Zusammenfassung und Export-XML weichen ab, es wird nichts importiert: ' + (@($Opened.Mismatch) -join ' ')) }
     if (-not (Test-Path -LiteralPath $Opened.XmlPath)) { throw 'Die Export-XML fehlt.' }
-    if (-not $BackupRoot) { $BackupRoot = Join-Path (Join-Path $env:ProgramData 'ServerMigration') ('dhcp-sicherung-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
-    [void](New-Item -ItemType Directory -Path $BackupRoot -Force)
+    Assert-SmDhcpNoReparse -Path (Split-Path -Parent $Opened.XmlPath), $Opened.XmlPath   # direkt vor Import-DhcpServer; das Handle in Opened.XmlHandle haelt die Datei gesperrt
+    # Sicherungsordner: der Elternordner (ProgramData\ServerMigration) und der Ordner selbst werden gehaertet und geprueft (Besitzer und Zugriffsliste nur Administratoren und SYSTEM)
+    if (-not $BackupRoot) {
+        Protect-SmDnsStateDir -Path (Get-SmDnsStateDir)
+        $BackupRoot = Join-Path (Get-SmDnsStateDir) ('dhcp-sicherung-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    }
+    Protect-SmDnsStateDir -Path $BackupRoot
     $a = @{ File = $Opened.XmlPath; BackupPath = $BackupRoot; Force = $true; ErrorAction = 'Stop' }
     if ($ServerConfigOnly) { $a.ServerConfigOnly = $true }
     else {
@@ -408,7 +507,11 @@ function Invoke-SmDhcpImport {
     $what = if ($ServerConfigOnly) { 'nur Serverkonfiguration' } elseif ($Plan.All) { 'alle Bereiche' } else { ('{0} Bereich(e) v4, {1} v6' -f $Plan.Selected4.Count, $Plan.Selected6.Count) }
     [void](Write-SmDhcpAudit -Action 'Import gestartet' -Text ('{0}{1}{2}, Sicherung in {3}' -f $what, $(if ($a.Leases) { ', mit Leases' } else { '' }), $(if ($a.ScopeOverwrite) { ', vorhandene Bereiche werden ersetzt' } else { '' }), $BackupRoot) -Log $Log)
     $w = @()
-    Import-DhcpServer @a -WarningVariable w
+    try { Import-DhcpServer @a -WarningVariable w }
+    catch {
+        [void](Write-SmDhcpAudit -Action 'Import fehlgeschlagen' -Text $_.Exception.Message -Log $Log)
+        throw
+    }
     foreach ($x in @($w)) { & $Log ('Warnung von Import-DhcpServer: ' + [string]$x) }
     [void](Write-SmDhcpAudit -Action 'Import beendet' -Text ('{0} Warnung(en)' -f @($w).Count) -Log $Log)
     [pscustomobject]@{ Warnings = @($w | ForEach-Object { [string]$_ }); BackupPath = $BackupRoot; FailoverNote = $Plan.FailoverNote }
@@ -420,7 +523,11 @@ function Invoke-SmDhcpAuthorize {
     $pre = Test-SmDhcpPrecheck -Mode Authorize
     if (-not $pre.Ok) { throw ('Vorpruefung nicht bestanden: ' + (($pre.Items | Where-Object { -not $_.Ok -and $_.Blocking } | ForEach-Object { $_.Text }) -join ' ')) }
     [void](Write-SmDhcpAudit -Action 'Autorisierung gestartet' -Text ('Add-DhcpServerInDC fuer ' + $env:COMPUTERNAME) -Log $Log)
-    Add-DhcpServerInDC -ErrorAction Stop | Out-Null
+    try { Add-DhcpServerInDC -ErrorAction Stop | Out-Null }
+    catch {
+        [void](Write-SmDhcpAudit -Action 'Autorisierung fehlgeschlagen' -Text $_.Exception.Message -Log $Log)
+        throw
+    }
     $now = Get-SmDhcpAuthState
     [void](Write-SmDhcpAudit -Action 'Autorisierung beendet' -Text $(if ($now -eq $true) { 'Server steht in der Liste der autorisierten DHCP-Server' } else { 'Eintrag angelegt, in der Liste noch nicht zu sehen (Replikation abwarten)' }) -Log $Log)
     $now
@@ -468,6 +575,22 @@ function Invoke-SmDhcpDeactivate {
     $ScopeIds.Count + $Prefixes.Count
 }
 
+function Get-SmDhcpDeactivateText {
+    <# Text der Bestaetigung zum Deaktivieren: nennt den Server (Computername). Hat dieser Server in dieser Sitzung importiert, kommt eine zusaetzliche Warnung. #>
+    param([Parameter(Mandatory)]$Plan, [string]$ServerName = $env:COMPUTERNAME, [bool]$ImportedHere = $false)
+    $t = "Diese Bereiche werden am Server $ServerName DEAKTIVIERT (Status InActive). Clients bekommen von diesem Server dann keine Adressen mehr.`n`n" + (($Plan.ScopeIds + $Plan.Prefixes) -join ', ')
+    if ($ImportedHere) { $t += "`n`nACHTUNG: Dieser Server ($ServerName) hat in dieser Sitzung selbst importiert. Er ist vermutlich der NEUE Server. Deaktiviert werden sollen die Bereiche am ALTEN Server. Nur fortfahren, wenn Sie das wirklich hier wollen." }
+    if ($Plan.Warnings.Count) { $t += "`n`nHinweise:`n- " + ($Plan.Warnings -join "`n- ") }
+    $t + "`n`nNur ausfuehren, wenn der neue Server die Bereiche uebernommen hat und autorisiert ist. Rueckgaengig: Bereich wieder aktivieren.`n`nFortfahren?"
+}
+
+function Get-SmDhcpExportText {
+    <# Text der Bestaetigung zum Export: nennt die personenbezogenen Daten (MAC-Adressen, Hostnamen), wenn Leases mitgehen. #>
+    param([switch]$NoLeases)
+    if ($NoLeases) { return "Der DHCP-Server wird OHNE Leases exportiert (Export-DhcpServer) und als ZIP in den Tauschordner gelegt.`n`nEnthalten sind Bereiche, Optionen und Reservierungen. Reservierungen nennen Geraetenamen und MAC-Adressen.`nEr aendert nichts am DHCP-Server.`n`nFortfahren?" }
+    "Der DHCP-Server wird MIT Leases exportiert (Export-DhcpServer -Leases) und als ZIP in den Tauschordner gelegt.`n`nDie Leases enthalten MAC-Adressen und Hostnamen der Geraete. Das sind personenbezogene Daten. Wenn Sie sie nicht brauchen, brechen Sie ab und waehlen `"Ohne Leases exportieren`". Den Tauschordner nach dem Projekt loeschen.`nDer Export aendert nichts am DHCP-Server.`n`nFortfahren?"
+}
+
 # ---------------------------------------------------------------- Oberflaeche
 
 function Register-SmDhcpServerPage {
@@ -476,7 +599,8 @@ function Register-SmDhcpServerPage {
         [Parameter(Mandatory)][hashtable]$Ui, [Parameter(Mandatory)][string[]]$JobModules,
         [Parameter(Mandatory)][scriptblock]$GetShare, [Parameter(Mandatory)][scriptblock]$AddLog
     )
-    $script:SmDhcpSrv = @{ Ui = $Ui; Modules = $JobModules; GetShare = $GetShare; AddLog = $AddLog; Remote = @{}; Down = $null; Opened = $null; OldScopes = @{} }
+    $script:SmDhcpSrv = @{ Ui = $Ui; Modules = $JobModules; GetShare = $GetShare; AddLog = $AddLog; Remote = @{}; Down = $null; Opened = $null; OldScopes = @{}; LastSha = $null; ImportedHere = $false }
+    $Ui.BtnDhcpCopySha.IsEnabled = $false
     $Ui.BoxDhcpImport.Visibility = 'Collapsed'
 
     $Ui.BtnDhcpCheck.Add_Click({
@@ -496,20 +620,29 @@ function Register-SmDhcpServerPage {
     $Ui.BtnDhcpExport.Add_Click({
             $c = $script:SmDhcpSrv; $u = $c.Ui; $share = & $c.GetShare
             if (-not $share) { & $c.AddLog 'DHCP: Kein Tauschordner verbunden (Seite "Dieser Server", "Ordner pruefen").'; return }
-            $msg = "Der DHCP-Server wird exportiert (Export-DhcpServer -Leases) und als ZIP in den Tauschordner gelegt.`n`nDer Export enthaelt Leases mit Geraete-Kennungen (MAC-Adressen). Er aendert nichts am DHCP-Server.`n`nFortfahren?"
+            $noLeases = [bool]$u.ChkDhcpNoLeases.IsChecked
+            $msg = Get-SmDhcpExportText -NoLeases:$noLeases
             if ([System.Windows.MessageBox]::Show($msg, 'DHCP exportieren', 'YesNo', 'Question') -ne 'Yes') { & $c.AddLog 'DHCP-Export abgebrochen.'; return }
-            $u.BtnDhcpExport.IsEnabled = $false; $u.PrgDhcpExport.Value = 0; $u.PrgDhcpExport.Visibility = 'Visible'; $u.TxtDhcpExport.Text = 'Exportiere ...'; $u.TxtDhcpExportSha.Text = ''
-            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share } -Script {
+            $u.BtnDhcpExport.IsEnabled = $false; $u.BtnDhcpCopySha.IsEnabled = $false; $c.LastSha = $null; $u.PrgDhcpExport.Value = 0; $u.PrgDhcpExport.Visibility = 'Visible'; $u.TxtDhcpExport.Text = 'Exportiere ...'; $u.TxtDhcpExportSha.Text = ''
+            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; NoLeases = $noLeases } -Script {
                     param($State, $P)
-                    Publish-SmDhcpExport -Share $P.Share -Progress { param($sent, $total) $State.Sent = $sent; $State.Total = $total } -Log { param($m) $State.Log.Enqueue($m) }
+                    Publish-SmDhcpExport -Share $P.Share -NoLeases:$P.NoLeases -Progress { param($sent, $total) $State.Sent = $sent; $State.Total = $total } -Log { param($m) $State.Log.Enqueue($m) }
                 } -OnTick { param($s) Write-SmDhcpJobLog $s; if ($s.Total -gt 0) { $script:SmDhcpSrv.Ui.PrgDhcpExport.Value = [math]::Min(100, 100 * $s.Sent / $s.Total) } } -OnDone {
                     param($result, $err)
                     $c2 = $script:SmDhcpSrv; $c2.Ui.BtnDhcpExport.IsEnabled = $true
                     if ($err) { $c2.Ui.TxtDhcpExport.Text = 'Fehlgeschlagen'; & $c2.AddLog ('DHCP-Export: Fehler: ' + $err); return }
                     $r = $result[-1]
                     $c2.Ui.TxtDhcpExport.Text = 'Fertig: ' + $r.Name
-                    $c2.Ui.TxtDhcpExportSha.Text = 'SHA256 ' + $r.Sha256 + '   (am neuen Server mit der Anzeige dort vergleichen)'
+                    $c2.LastSha = [string]$r.Sha256
+                    $c2.Ui.BtnDhcpCopySha.IsEnabled = $true
+                    $c2.Ui.TxtDhcpExportSha.Text = 'SHA256 ' + $r.Sha256 + '   (mit "SHA256 kopieren" holen und am neuen Server einfuegen)'
                 })
+        })
+    $Ui.BtnDhcpCopySha.Add_Click({
+            $c = $script:SmDhcpSrv
+            if (-not $c.LastSha) { return }
+            try { [System.Windows.Clipboard]::SetText($c.LastSha); & $c.AddLog 'DHCP: SHA256 des Exports in die Zwischenablage kopiert.' }
+            catch { & $c.AddLog ('DHCP: Kopieren fehlgeschlagen: ' + $_.Exception.Message) }
         })
 
     $Ui.BtnDhcpFind.Add_Click({
@@ -535,8 +668,8 @@ function Register-SmDhcpServerPage {
             $c = $script:SmDhcpSrv; $u = $c.Ui; $share = & $c.GetShare
             $remote = $c.Remote[[string]$u.LstDhcpExports.SelectedItem]
             if (-not $share -or -not $remote) { return }
-            if ($c.Down) { Remove-SmDhcpTemp -Dir $c.Down.Dir; $c.Down = $null }
-            $c.Opened = $null; $u.BoxDhcpImport.Visibility = 'Collapsed'; $u.ChkDhcpShaOk.IsChecked = $false; $u.ChkDhcpShaOk.IsEnabled = $false; $u.BtnDhcpOpen.IsEnabled = $false
+            if ($c.Down) { Close-SmDhcpImport -Down $c.Down -Opened $c.Opened; $c.Down = $null }
+            $c.Opened = $null; $u.BoxDhcpImport.Visibility = 'Collapsed'; $u.TxtDhcpShaIn.Text = ''; $u.TxtDhcpShaIn.IsEnabled = $false; $u.TxtDhcpShaState.Text = ''; $u.BtnDhcpOpen.IsEnabled = $false
             $u.BtnDhcpDownload.IsEnabled = $false; $u.TxtDhcpDlSha.Text = 'Lade herunter ...'
             [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; Remote = $remote } -Script {
                     param($State, $P)
@@ -546,30 +679,38 @@ function Register-SmDhcpServerPage {
                     $c2 = $script:SmDhcpSrv; $u2 = $c2.Ui; $u2.BtnDhcpDownload.IsEnabled = $true
                     if ($err) { $u2.TxtDhcpDlSha.Text = 'Fehlgeschlagen'; & $c2.AddLog ('DHCP: Download fehlgeschlagen: ' + $err); return }
                     $c2.Down = $result[-1]
-                    $u2.TxtDhcpDlSha.Text = 'SHA256 ' + $c2.Down.Sha256
-                    $u2.ChkDhcpShaOk.IsEnabled = $true
+                    $u2.TxtDhcpDlSha.Text = 'Berechnet am neuen Server: SHA256 ' + $c2.Down.Sha256
+                    $u2.TxtDhcpShaIn.IsEnabled = $true; $u2.TxtDhcpShaState.Text = 'Bitte die vollstaendige SHA256 vom alten Server einfuegen.'
                     & $c2.AddLog ('DHCP: heruntergeladen: {0} ({1}), SHA256 {2}' -f $c2.Down.Name, (Format-SmSize $c2.Down.Length), $c2.Down.Sha256)
                 })
         })
-    $Ui.ChkDhcpShaOk.Add_Click({ $u = $script:SmDhcpSrv.Ui; $u.BtnDhcpOpen.IsEnabled = [bool]$u.ChkDhcpShaOk.IsChecked })
+    $Ui.TxtDhcpShaIn.Add_TextChanged({
+            $c = $script:SmDhcpSrv; $u = $c.Ui
+            $ok = [bool]($c.Down -and (Test-SmDhcpShaMatch -Expected $c.Down.Sha256 -Entered $u.TxtDhcpShaIn.Text))
+            $u.BtnDhcpOpen.IsEnabled = $ok
+            $u.TxtDhcpShaState.Text = if (-not $c.Down) { '' } elseif ($ok) { 'Die Pruefsumme stimmt vollstaendig ueberein.' } elseif (-not $u.TxtDhcpShaIn.Text.Trim()) { 'Bitte die vollstaendige SHA256 vom alten Server einfuegen.' } else { 'Die Pruefsumme stimmt NICHT ueberein (oder ist unvollstaendig). Oeffnen und Import bleiben aus.' }
+        })
 
     $Ui.BtnDhcpOpen.Add_Click({
             $c = $script:SmDhcpSrv; $u = $c.Ui
-            if (-not $c.Down -or -not [bool]$u.ChkDhcpShaOk.IsChecked) { return }
-            & $c.AddLog ('DHCP: SHA256 vom Benutzer als gleich zur Anzeige am alten Server bestaetigt: ' + $c.Down.Sha256)
+            if (-not $c.Down -or -not (Test-SmDhcpShaMatch -Expected $c.Down.Sha256 -Entered $u.TxtDhcpShaIn.Text)) { $u.BtnDhcpOpen.IsEnabled = $false; return }
+            $entered = $u.TxtDhcpShaIn.Text
+            & $c.AddLog ('DHCP: eingegebene SHA256 stimmt vollstaendig mit der Datei ueberein: ' + $c.Down.Sha256)
             $u.BtnDhcpOpen.IsEnabled = $false
-            [void](Start-SmJob -Modules $c.Modules -Params @{ Zip = $c.Down.ZipPath; Dir = $c.Down.Dir } -Script {
+            [void](Start-SmJob -Modules $c.Modules -Params @{ Zip = $c.Down.ZipPath; Dir = $c.Down.Dir; Sha = $entered } -Script {
                     param($State, $P)
-                    Open-SmDhcpExport -ZipPath $P.Zip -Dir $P.Dir
+                    Open-SmDhcpExport -ZipPath $P.Zip -Dir $P.Dir -ExpectedSha $P.Sha
                 } -OnDone {
                     param($result, $err)
                     $c2 = $script:SmDhcpSrv; $u2 = $c2.Ui; $u2.BtnDhcpOpen.IsEnabled = $true
                     if ($err) { & $c2.AddLog ('DHCP: Export abgelehnt: ' + $err); return }
                     $c2.Opened = $result[-1]; $s = $c2.Opened.Summary
                     $u2.LstDhcpScopes.Items.Clear()
-                    foreach ($x in $s.Scopes4) { [void]$u2.LstDhcpScopes.Items.Add(('v4  {0}  {1}  ({2} Leases)' -f $x.ScopeId, $x.Name, $x.Leases)) }
-                    foreach ($x in $s.Scopes6) { [void]$u2.LstDhcpScopes.Items.Add(('v6  {0}  {1}  ({2} Leases)' -f $x.Prefix, $x.Name, $x.Leases)) }
-                    $u2.TxtDhcpInfo.Text = 'Export von {0} ({1}): {2} Bereich(e) v4, {3} v6. {4}' -f $s.Server, $s.Created, @($s.Scopes4).Count, @($s.Scopes6).Count, (Get-SmDhcpFailoverNote -Summary $s)
+                    # Die Liste kommt aus der Export-XML (das, was importiert wird); Namen und Lease-Zahl ergaenzt die Zusammenfassung
+                    foreach ($x in $c2.Opened.Facts.Scopes4) { $m = @($s.Scopes4 | Where-Object { $_.ScopeId -eq $x.Id }); [void]$u2.LstDhcpScopes.Items.Add(('v4  {0}  {1}  ({2} Leases)' -f $x.Id, $x.Name, $(if ($m.Count) { $m[0].Leases } else { '?' }))) }
+                    foreach ($x in $c2.Opened.Facts.Scopes6) { $m = @($s.Scopes6 | Where-Object { $_.Prefix -eq $x.Id }); [void]$u2.LstDhcpScopes.Items.Add(('v6  {0}  {1}  ({2} Leases)' -f $x.Id, $x.Name, $(if ($m.Count) { $m[0].Leases } else { '?' }))) }
+                    $u2.TxtDhcpInfo.Text = 'Export von {0} ({1}): {2} Bereich(e) v4, {3} v6 laut Export-XML. {4}{5}' -f $s.Server, $s.Created, @($c2.Opened.Facts.Scopes4).Count, @($c2.Opened.Facts.Scopes6).Count, (Get-SmDhcpFailoverNote -Summary $s), $(if ($c2.Opened.Mismatch.Count) { "`r`nZusammenfassung und Export-XML weichen ab, Import gesperrt: " + ($c2.Opened.Mismatch -join ' ') } else { '' })
+                    if ($c2.Opened.Mismatch.Count) { & $c2.AddLog ('DHCP: Zusammenfassung und Export-XML weichen ab: ' + ($c2.Opened.Mismatch -join ' ')) }
                     $u2.RdoDhcpAll.IsChecked = $true
                     $u2.BoxDhcpImport.Visibility = 'Visible'
                     & $c2.AddLog 'DHCP: Export geprueft (XML ohne DTD, Zusammenfassung gueltig)'
@@ -587,11 +728,11 @@ function Register-SmDhcpServerPage {
             }
             $leases = [bool]$u.ChkDhcpLeases.IsChecked
             $u.BtnDhcpImport.IsEnabled = $false; $u.TxtDhcpImport.Text = 'Pruefe ...'
-            [void](Start-SmJob -Modules $c.Modules -Params @{ Summary = $c.Opened.Summary; All = $all; Ids = $ids; Px = $px } -Script {
+            [void](Start-SmJob -Modules $c.Modules -Params @{ Summary = $c.Opened.Summary; Facts = $c.Opened.Facts; All = $all; Ids = $ids; Px = $px } -Script {
                     param($State, $P)
                     $pre = Test-SmDhcpPrecheck -Mode Import
                     $plan = $null
-                    if ($pre.Ok) { $plan = Get-SmDhcpImportPlan -Summary $P.Summary -All:$P.All -ScopeIds $P.Ids -Prefixes $P.Px }
+                    if ($pre.Ok) { $plan = Get-SmDhcpImportPlan -Summary $P.Summary -Facts $P.Facts -All:$P.All -ScopeIds $P.Ids -Prefixes $P.Px }
                     [pscustomobject]@{ Pre = $pre; Plan = $plan }
                 } -OnDone {
                     param($result, $err)
@@ -601,8 +742,9 @@ function Register-SmDhcpServerPage {
                     if (-not $r.Pre.Ok) { $u2.TxtDhcpImport.Text = ($r.Pre.Lines -join "`r`n"); & $c2.AddLog 'DHCP: Vorpruefung des Imports nicht bestanden.'; return }
                     $plan = $r.Plan
                     if (-not $plan.Ok) { $u2.TxtDhcpImport.Text = ($plan.Blocking -join "`r`n"); & $c2.AddLog ('DHCP: Import nicht moeglich: ' + ($plan.Blocking -join ' ')); return }
-                    $what = if ($plan.All) { 'ALLE Bereiche und die Serverkonfiguration' } else { ('Bereiche: ' + (($plan.Selected4 + $plan.Selected6) -join ', ')) }
+                    $what = if ($plan.All) { 'ALLE Bereiche (laut Export-XML) und die Serverkonfiguration' } else { ('Bereiche (laut Export-XML): ' + (($plan.Selected4 + $plan.Selected6) -join ', ')) }
                     $msg = "Import auf diesem Server (Import-DhcpServer)`n`n$what`n" + $(if ([bool]$u2.ChkDhcpLeases.IsChecked) { "mit Leases`n" } else { "ohne Leases`n" }) +
+                    "`nWas die Export-XML enthaelt (das wird importiert):`n- " + ($plan.Preview -join "`n- ") + "`n" +
                     $(if ($plan.Warnings.Count) { "`nHinweise:`n- " + ($plan.Warnings -join "`n- ") + "`n" } else { '' }) +
                     "`nVor der Aenderung sichert der Import die DHCP-Datenbank. Fortfahren?"
                     if ([System.Windows.MessageBox]::Show($msg, 'DHCP importieren', 'YesNo', 'Warning') -ne 'Yes') { & $c2.AddLog 'DHCP-Import abgebrochen.'; return }
@@ -621,8 +763,12 @@ function Register-SmDhcpServerPage {
                         } -OnTick { param($s) Write-SmDhcpJobLog $s } -OnDone {
                             param($result2, $err2)
                             $c3 = $script:SmDhcpSrv; $c3.Ui.BtnDhcpImport.IsEnabled = $true
+                            # Aufraeumen: Handles zu, Arbeitsordner weg (auch nach einem Fehler; fuer einen neuen Versuch neu herunterladen)
+                            Close-SmDhcpImport -Down $c3.Down -Opened $c3.Opened; $c3.Down = $null; $c3.Opened = $null
+                            $c3.Ui.BtnDhcpImport.IsEnabled = $false; $c3.Ui.TxtDhcpShaIn.Text = ''; $c3.Ui.TxtDhcpShaIn.IsEnabled = $false; $c3.Ui.BtnDhcpOpen.IsEnabled = $false
                             if ($err2) { $c3.Ui.TxtDhcpImport.Text = 'Fehlgeschlagen'; & $c3.AddLog ('DHCP-Import: Fehler: ' + $err2); return }
                             $r2 = $result2[-1]
+                            $c3.ImportedHere = $true   # fuer die Warnung beim Deaktivieren: dieser Server hat in dieser Sitzung importiert
                             $c3.Ui.TxtDhcpImport.Text = 'Fertig. ' + $(if ($r2.Warnings.Count) { '{0} Warnung(en), siehe Protokoll. ' -f $r2.Warnings.Count } else { '' }) + 'Naechste Schritte: Autorisieren, Zusammenfassung hochladen, Failover von Hand.'
                             if ($r2.FailoverNote) { & $c3.AddLog ('DHCP: ' + $r2.FailoverNote) }
                         })
@@ -653,10 +799,12 @@ function Register-SmDhcpServerPage {
     $Ui.BtnDhcpAfter.Add_Click({
             $c = $script:SmDhcpSrv; $u = $c.Ui; $share = & $c.GetShare
             if (-not $share) { & $c.AddLog 'DHCP: Kein Tauschordner verbunden.'; return }
+            $noLeases = [bool]$u.ChkDhcpAfterNoLeases.IsChecked
+            if (-not $noLeases -and [System.Windows.MessageBox]::Show("Die Datei enthaelt je Adresse die Lease-Zuordnung mit MAC-Adressen der Geraete. Das sind personenbezogene Daten. Wenn Sie sie nicht brauchen, brechen Sie ab und setzen Sie den Haken `"Ohne Leases`".`n`nFortfahren?", 'Stand hochladen', 'YesNo', 'Question') -ne 'Yes') { & $c.AddLog 'DHCP: Hochladen abgebrochen.'; return }
             $u.BtnDhcpAfter.IsEnabled = $false; $u.TxtDhcpAfter.Text = 'Lese und lade hoch ...'
-            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share } -Script {
+            [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; NoLeases = $noLeases } -Script {
                     param($State, $P)
-                    Publish-SmDhcpAfter -Share $P.Share -Log { param($m) $State.Log.Enqueue($m) }
+                    Publish-SmDhcpAfter -Share $P.Share -NoLeases:$P.NoLeases -Log { param($m) $State.Log.Enqueue($m) }
                 } -OnTick { param($s) Write-SmDhcpJobLog $s } -OnDone {
                     param($result, $err)
                     $c2 = $script:SmDhcpSrv; $c2.Ui.BtnDhcpAfter.IsEnabled = $true
@@ -694,8 +842,7 @@ function Register-SmDhcpServerPage {
                     $r = $result[-1]
                     if (-not $r.Pre.Ok) { & $c2.AddLog ('DHCP: Vorpruefung nicht bestanden: ' + (($r.Pre.Lines | Where-Object { $_ -like '`[!!`]*' }) -join ' ')); return }
                     if (-not $r.Plan.Ok) { & $c2.AddLog ('DHCP: Bereiche nicht gefunden: ' + ($r.Plan.Missing -join ', ')); return }
-                    $msg = "Diese Bereiche werden an DIESEM Server DEAKTIVIERT (Status InActive). Clients bekommen von hier dann keine Adressen mehr.`n`n" + (($r.Plan.ScopeIds + $r.Plan.Prefixes) -join ', ') +
-                    $(if ($r.Plan.Warnings.Count) { "`n`nHinweise:`n- " + ($r.Plan.Warnings -join "`n- ") } else { '' }) + "`n`nNur ausfuehren, wenn der neue Server die Bereiche uebernommen hat und autorisiert ist. Rueckgaengig: Bereich wieder aktivieren.`n`nFortfahren?"
+                    $msg = Get-SmDhcpDeactivateText -Plan $r.Plan -ServerName ([string]$env:COMPUTERNAME) -ImportedHere ([bool]$c2.ImportedHere)
                     if ([System.Windows.MessageBox]::Show($msg, 'Bereiche am alten Server deaktivieren', 'YesNo', 'Warning') -ne 'Yes') { & $c2.AddLog 'DHCP: Deaktivieren abgebrochen.'; return }
                     $u2.BtnDhcpDeactivate.IsEnabled = $false
                     [void](Start-SmJob -Modules $c2.Modules -Params @{ Ids = $r.Plan.ScopeIds; Px = $r.Plan.Prefixes } -Script {
