@@ -291,10 +291,35 @@ function ConvertTo-SmDhcpShaText {
     if ($t -match '^[0-9A-F]{64}$') { $t } else { $null }
 }
 
+function Get-SmDhcpPastedSha {
+    <#
+        Pruefsumme aus eingefuegtem Text: nur die Pruefsumme (Leerraum egal) oder die kopierten Zeilen "Name: SHA256" des Assistenten.
+        Eine 64-stellige Hex-Folge: diese. Mehrere: die der Zeile, deren Name mit "DHCP" beginnt (genau eine). Sonst $null.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $plain = ConvertTo-SmDhcpShaText $Text
+    if ($plain) { return $plain }
+    $rx = '(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])'
+    $all = @([regex]::Matches([string]$Text, $rx) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+    if ($all.Count -eq 1) { return $all[0] }
+    if ($all.Count -gt 1) {
+        $own = @(([string]$Text -split '\r?\n') | Where-Object { $_ -match '^\s*DHCP' } | ForEach-Object { @([regex]::Matches($_, $rx) | ForEach-Object { $_.Value.ToUpperInvariant() }) } | Select-Object -Unique)
+        if ($own.Count -eq 1) { return $own[0] }
+    }
+    $null
+}
+
+function Test-SmDhcpShaAmbiguous {
+    <# $true, wenn der Text mehrere verschiedene Pruefsummen enthaelt und keine eindeutig die DHCP-Zeile ist. #>
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    if (Get-SmDhcpPastedSha $Text) { return $false }
+    @([regex]::Matches([string]$Text, '(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])') | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique).Count -gt 1
+}
+
 function Test-SmDhcpShaMatch {
-    <# $true nur, wenn beide Werte vollstaendige SHA256 sind und gleich (ohne Gross-/Kleinschreibung und Leerraum). Leer oder zu kurz ist $false. #>
+    <# $true nur, wenn beide Werte vollstaendige SHA256 sind und gleich (ohne Gross-/Kleinschreibung und Leerraum). Leer oder zu kurz ist $false. Die Eingabe darf die Zeilen "Name: SHA256" des Assistenten enthalten (Get-SmDhcpPastedSha). #>
     param([string]$Expected, [string]$Entered)
-    $a = ConvertTo-SmDhcpShaText $Expected; $b = ConvertTo-SmDhcpShaText $Entered
+    $a = ConvertTo-SmDhcpShaText $Expected; $b = Get-SmDhcpPastedSha $Entered
     if (-not $a -or -not $b) { return $false }
     [string]::Equals($a, $b, [StringComparison]::Ordinal)
 }

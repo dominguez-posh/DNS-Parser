@@ -759,7 +759,7 @@ function Register-SmDhcpServerPage {
             $c = $script:SmDhcpSrv; $u = $c.Ui
             $ok = [bool]($c.Down -and (Test-SmDhcpShaMatch -Expected $c.Down.Sha256 -Entered $u.TxtDhcpShaIn.Text))
             $u.BtnDhcpOpen.IsEnabled = $ok
-            $u.TxtDhcpShaState.Text = if (-not $c.Down) { '' } elseif ($ok) { 'Die Pruefsumme stimmt vollstaendig ueberein.' } elseif (-not $u.TxtDhcpShaIn.Text.Trim()) { 'Bitte die vollstaendige SHA256 vom alten Server einfuegen.' } else { 'Die Pruefsumme stimmt NICHT ueberein (oder ist unvollstaendig). Oeffnen und Import bleiben aus.' }
+            $u.TxtDhcpShaState.Text = if (-not $c.Down) { '' } elseif ($ok) { 'Die Pruefsumme stimmt vollstaendig ueberein.' } elseif (-not $u.TxtDhcpShaIn.Text.Trim()) { 'Bitte die vollstaendige SHA256 vom alten Server einfuegen.' } elseif (Test-SmDhcpShaAmbiguous $u.TxtDhcpShaIn.Text) { 'Bitte nur die DHCP-Pruefsumme einfuegen.' } else { 'Die Pruefsumme stimmt NICHT ueberein (oder ist unvollstaendig). Oeffnen und Import bleiben aus.' }
         })
 
     $Ui.BtnDhcpOpen.Add_Click({
