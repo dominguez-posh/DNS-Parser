@@ -157,6 +157,7 @@ $ui.BtnCopy.Add_Click({
 # aktives Projekt: sein Tauschordner-Link kommt in die Seite Tauschordner (verbunden wird per Klick)
 Initialize-SmProjectPage -Ui $ui -JobModules $jobModules -AddLog ${function:Add-Log} -OnActiveChanged {
     param($project)
+    if ($project -and $project['ShareLink'] -and -not (Test-SmShareHostConfirmed $project)) { Add-Log ('Tauschordner-Link aus Projekt NICHT übernommen (Host nicht bestätigt): ' + $project['Name']); return }
     if ($project -and $project['ShareLink']) { $ui.TxtLink.Text = [string]$project['ShareLink']; $ui.TxtShareState.Text = 'Link aus dem Projekt übernommen, bitte Verbinden'; Add-Log ('Tauschordner-Link aus Projekt: ' + $project['Name']) }
 }
 

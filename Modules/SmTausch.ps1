@@ -43,6 +43,14 @@ function Format-SmSpString {
     "'" + [uri]::EscapeDataString($Value.Replace("'", "''")) + "'"
 }
 
+function Test-SmFinalHost {
+    <# Weiterleitungsziel: https auf *.sharepoint.com (mit -AnyHost nur fuer Tests: derselbe Host wie der Link). #>
+    param($Final, [string]$Authority, [switch]$AnyHost)
+    if (-not $Final) { return $false }
+    if ($AnyHost) { return ($Final.Authority -eq $Authority) }
+    [bool]($Final.Scheme -eq 'https' -and $Final.Host -match '^[A-Za-z0-9-]+\.sharepoint\.com$')
+}
+
 function Connect-SmShare {
     <# Oeffnet den Tauschordner ueber den Freigabelink. Liefert ein Objekt mit Web, Folder und Session. #>
     param([Parameter(Mandatory)][string]$Link, [switch]$AnyHost)   # AnyHost nur fuer Tests: Ziel muss derselbe Host wie der Link sein
@@ -54,7 +62,7 @@ function Connect-SmShare {
         throw ("Der Tauschordner ist nicht erreichbar: {0}. Hat der Server Internetzugang zu *.sharepoint.com? Ist der Link noch gueltig?" -f $_.Exception.Message)
     }
     $final = Get-SmFinalUri $r
-    $okHost = if ($AnyHost) { $final -and $final.Authority -eq ([uri]$Link).Authority } else { $final -and $final.Scheme -eq 'https' -and $final.Host -match '^[A-Za-z0-9-]+\.sharepoint\.com$' }
+    $okHost = Test-SmFinalHost -Final $final -Authority ([uri]$Link).Authority -AnyHost:$AnyHost
     if (-not $okHost) { throw 'Der Freigabelink leitet auf ein unerlaubtes Ziel weiter (erlaubt: https auf *.sharepoint.com). Abgebrochen.' }
     $folder = Resolve-SmShareFolder -FinalUri $final -Content $r.Content
     if (-not $folder) {
@@ -69,17 +77,20 @@ function Connect-SmShare {
         Folder  = $folder
         Name    = $parts[-1]
         Session = $shareSession
+        AnyHost = [bool]$AnyHost
+        Authority = ([uri]$Link).Authority
         Digest  = $null
         DigestAt = [datetime]::MinValue
     }
 }
 
 function Invoke-SmShareApi {
-    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$Uri, [string]$Method = 'Get', $Body, [string]$OutFile, [hashtable]$Headers = @{})
+    param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][string]$Uri, [string]$Method = 'Get', $Body, [string]$OutFile, [hashtable]$Headers = @{}, [switch]$Response)
     $h = @{ Accept = 'application/json;odata=nometadata' }
     foreach ($k in $Headers.Keys) { $h[$k] = $Headers[$k] }
     $p = @{ Uri = $Uri; Method = $Method; WebSession = $Share.Session; Headers = $h; UseBasicParsing = $true; ErrorAction = 'Stop' }
     if ($null -ne $Body) { $p.Body = $Body; $p.ContentType = 'application/octet-stream' }
+    if ($Response) { return (Invoke-WebRequest @p) }   # Antwort mit Kopfzeilen (z. B. ETag)
     if ($OutFile) { $p.OutFile = $OutFile; Invoke-WebRequest @p | Out-Null; return }
     Invoke-RestMethod @p
 }

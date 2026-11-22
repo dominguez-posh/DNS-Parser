@@ -76,6 +76,9 @@ Check 'Manipuliert: Datei angehaengt' (Throws { Unprotect-SmProjectData -Bytes (
 Check 'Fremde Datei (falsche Kennung) abgelehnt' (ThrowsLike { Unprotect-SmProjectData -Bytes (New-Object byte[] 200) -Password $pw } 'keine Projektdatei')
 Check 'Unbekannte Formatversion klar gemeldet' (ThrowsLike { $c = [byte[]]$enc.Clone(); $c[4] = 2; Unprotect-SmProjectData -Bytes $c -Password $pw } 'Format 2')
 Check 'Verschluesseln: zu kurzes Kennwort abgelehnt' (Throws { Protect-SmProjectData -Data $list -Password 'kurz' })
+Check 'Kennwort: Mindestlaenge 12 (11 Zeichen abgelehnt, 12 angenommen)' ($script:SmProjMinPassword -eq 12 -and (Throws { Protect-SmProjectData -Data $list -Password ('a' * 11) }) -and -not (Throws { Protect-SmProjectData -Data $list -Password ('a' * 12) }))
+Check 'Kennwort-Dialog: Hinweis Passphrase empfohlen vorhanden' ((Get-SmPasswordDialogXaml) -match 'Passphrase empfohlen')
+Check 'Seite Projekte: Hinweis auf aeltere Fassung (Rollback) vorhanden' ([IO.File]::ReadAllText((Join-Path $Repo 'UI\Projekte.xaml')) -match ('' + [char]0xE4 + 'ltere Fassung'))
 Check 'Verschluesseln: zu wenige Iterationen abgelehnt' (Throws { Protect-SmProjectData -Data $list -Password $pw -Iterations 1000 })
 Check 'Entschluesseln: zu grosse Datei abgelehnt' (ThrowsLike { Unprotect-SmProjectData -Bytes (New-Object byte[] (21MB)) -Password $pw } 'zu gross')
 
@@ -152,6 +155,75 @@ Check 'Vergessen: Datei geloescht, nichts mehr gemerkt' (-not (Test-Path $rem) -
 [IO.File]::WriteAllText($rem, 'kein-gueltiger-DPAPI-Text')
 Check 'Merken: unlesbare Datei gilt als nicht gemerkt (kein Absturz)' ($null -eq (Get-SmRemembered -Path $rem))
 
+Check 'Merken: Standardpfad liegt in LOCALAPPDATA, nicht im Roaming-Profil' ((Get-SmRememberPath).StartsWith($env:LOCALAPPDATA, [StringComparison]::OrdinalIgnoreCase) -and -not (Get-SmRememberPath).StartsWith($env:APPDATA, [StringComparison]::OrdinalIgnoreCase))
+$legacy = Join-Path $Work 'alt\ServerMigration\verbindung.dat'
+New-Item -ItemType Directory -Force (Split-Path -Parent $legacy) | Out-Null
+[IO.File]::WriteAllText($legacy, 'alt')
+Check 'Merken: alte Datei in %APPDATA% wird einmalig geloescht' ((Remove-SmLegacyRemembered -Path $legacy) -and -not (Test-Path $legacy) -and -not (Remove-SmLegacyRemembered -Path $legacy))
+$srcAll = [IO.File]::ReadAllText((Join-Path $Repo 'Modules\SmProjekte.ps1'))
+Check 'Merken: ohne Haken beim Verbinden wird Clear-SmRemembered gerufen (beide Stellen)' ([regex]::Matches($srcAll, 'else \{ try \{ Clear-SmRemembered').Count -eq 2)
+
+# ---------------------------------------------------------------- 4b. Link-Host bestaetigen
+Check 'Host: aus dem Link, kleingeschrieben' ((Get-SmShareHost 'https://Contoso-My.SharePoint.com/:f:/g/x') -eq 'contoso-my.sharepoint.com' -and $null -eq (Get-SmShareHost ''))
+Check 'Host: Projekt mit Link ist zunaechst nicht bestaetigt, ohne Link immer' (-not (Test-SmShareHostConfirmed $p1) -and (Test-SmShareHostConfirmed (New-SmProject -Name 'ohne')))
+$pc = Set-SmShareHostConfirmed $p1
+Check 'Host: nach Bestaetigen vermerkt, Original unveraendert' ((Test-SmShareHostConfirmed $pc) -and -not (Test-SmShareHostConfirmed $p1) -and @($pc['ShareHostConfirmed']) -contains 'contoso-my.sharepoint.com')
+$lc = Unprotect-SmProjectData -Bytes (Protect-SmProjectData -Data (Set-SmProjectInList -List (New-SmProjectList) -Project $pc) -Password $pw) -Password $pw
+Check 'Host: bestaetigter Host steht in der verschluesselten Liste und ueberlebt den Rundlauf' (Test-SmShareHostConfirmed (ConvertTo-SmProjectList $lc)['Projects'][0])
+$pOther = Copy-SmData $pc; $pOther['ShareLink'] = 'https://fabrikam-my.sharepoint.com/:f:/g/personal/x/EAbc'
+Check 'Host: anderer Host im Link ist wieder unbestaetigt' (-not (Test-SmShareHostConfirmed (ConvertTo-SmProjectRecord $pOther)))
+$pBad = Copy-SmData $p1; $pBad['ShareHostConfirmed'] = @('ok.example.com', "evil';calc", 'x y')
+Check 'Host: ungueltige Eintraege in ShareHostConfirmed werden verworfen' (@((ConvertTo-SmProjectRecord $pBad)['ShareHostConfirmed']).Count -eq 1)
+$pPre = Copy-SmData $p1; $pPre['ShareHostConfirmed'] = @('contoso-my.sharepoint.com')
+$impPre = Import-SmProject -Bytes (Export-SmProject -Project $pPre -Password $expPw) -Password $expPw
+Check 'Import: mitgebrachte ShareHostConfirmed wird verworfen, Host unbestaetigt' (@($impPre['ShareHostConfirmed']).Count -eq 0 -and -not (Test-SmShareHostConfirmed $impPre))
+$infoNew = Get-SmImportInfo -Imported $impPre -Existing $null
+Check 'Import-Info: neues Projekt mit Link verlangt Bestaetigung und nennt den Host' ($infoNew.NeedsHostConfirm -and $infoNew.HostNew -eq 'contoso-my.sharepoint.com' -and -not $infoNew.Exists)
+$infoSame = Get-SmImportInfo -Imported $impPre -Existing $pc
+Check 'Import-Info: gleicher Link, Host beim vorhandenen Projekt schon bestaetigt: keine Rueckfrage' (-not $infoSame.NeedsHostConfirm -and $infoSame.Exists)
+$impChanged = Copy-SmData $impPre; $impChanged['ShareLink'] = 'https://fabrikam-my.sharepoint.com/:f:/g/personal/x/EAbc'; $impChanged['Name'] = 'Contoso Neu'
+$infoChg = Get-SmImportInfo -Imported (ConvertTo-SmProjectRecord $impChanged) -Existing $pc
+Check 'Import-Info: geaenderter Link auf anderen Host verlangt Bestaetigung' ($infoChg.NeedsHostConfirm -and $infoChg.HostOld -eq 'contoso-my.sharepoint.com' -and $infoChg.HostNew -eq 'fabrikam-my.sharepoint.com')
+$askTxt = Format-SmImportReplaceText $infoChg
+Check 'Ersetzen-Dialog zeigt Name UND Host alt und neu' ($askTxt -match 'Contoso Migration' -and $askTxt -match 'Contoso Neu' -and $askTxt -match 'contoso-my\.sharepoint\.com' -and $askTxt -match 'fabrikam-my\.sharepoint\.com')
+Check 'Bestaetigungs-Dialog nennt den Host' ((Format-SmHostConfirmText -HostName 'contoso-my.sharepoint.com' -ProjectName 'X') -match 'contoso-my\.sharepoint\.com')
+Check 'Quelltext: Aktivieren fragt bei unbestaetigtem Host, das Berater-Tool uebernimmt den Link nur bestaetigt' ($srcAll -match 'Test-SmShareHostConfirmed \$p' -and [IO.File]::ReadAllText((Join-Path $Repo 'Start-ServerMigration.ps1')) -match 'Test-SmShareHostConfirmed \$project')
+
+# ---------------------------------------------------------------- 4c. Zusammenfuehren
+function MkL($ps) { $l = New-SmProjectList; foreach ($x in $ps) { $l = Set-SmProjectInList -List $l -Project $x -KeepModified }; $l }
+function Edit($p, $name) { $c = Copy-SmData $p; $c['Name'] = $name; ConvertTo-SmProjectRecord $c }
+$mA = New-SmProject -Name 'A'; $mB = New-SmProject -Name 'B'; $mC = New-SmProject -Name 'C'
+$baseL = MkL @($mA, $mB, $mC)
+function Names($r) { (@($r.List['Projects'] | ForEach-Object { $_['Name'] } | Sort-Object) -join ',') }
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @((Edit $mA 'A-meins'), $mB, $mC)) -Theirs (MkL @($mA, (Edit $mB 'B-deren'), $mC))
+Check 'Zusammenfuehren: verschiedene Projekte geaendert -> beides drin, kein Konflikt' ((Names $r) -eq 'A-meins,B-deren,C' -and $r.Conflicts.Count -eq 0)
+$mN1 = New-SmProject -Name 'N-meins'; $mN2 = New-SmProject -Name 'N-deren'
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @($mA, $mB, $mC, $mN1)) -Theirs (MkL @($mA, $mB, $mC, $mN2))
+Check 'Zusammenfuehren: beide legen ein neues Projekt an -> beide drin' ((Names $r) -eq 'A,B,C,N-deren,N-meins' -and $r.Conflicts.Count -eq 0)
+$mine2 = MkL @((Edit $mA 'A-meins'), $mB, $mC); $their2 = MkL @((Edit $mA 'A-deren'), $mB, $mC)
+$r = Merge-SmProjectLists -Base $baseL -Mine $mine2 -Theirs $their2
+Check 'Zusammenfuehren: dasselbe Projekt verschieden geaendert -> Konflikt gemeldet (ohne Wahl gilt deren Fassung)' ($r.Conflicts.Count -eq 1 -and $r.Conflicts[0].Kind -eq 'Beide' -and $r.Unresolved -eq 1 -and (Names $r) -eq 'A-deren,B,C')
+$r = Merge-SmProjectLists -Base $baseL -Mine $mine2 -Theirs $their2 -Choices @{ $mA['Id'] = 'Mine' }
+Check 'Zusammenfuehren: Wahl "meine Fassung" -> meine Fassung, aufgeloest' ((Names $r) -eq 'A-meins,B,C' -and $r.Unresolved -eq 0)
+$r = Merge-SmProjectLists -Base $baseL -Mine $mine2 -Theirs $their2 -Choices @{ $mA['Id'] = 'Theirs' }
+Check 'Zusammenfuehren: Wahl "deren Fassung" -> deren Fassung' ((Names $r) -eq 'A-deren,B,C' -and $r.Unresolved -eq 0)
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @((Edit $mA 'gleich'), $mB, $mC)) -Theirs (MkL @((Edit $mA 'gleich'), $mB, $mC))
+Check 'Zusammenfuehren: beide haben dasselbe geaendert -> kein Konflikt' ($r.Conflicts.Count -eq 0 -and (Names $r) -eq 'B,C,gleich')
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @($mB, $mC)) -Theirs (MkL @($mA, (Edit $mB 'B-deren'), $mC))
+Check 'Zusammenfuehren: ich loesche A (beim anderen unveraendert), der andere aendert B -> A weg, B-deren da' ((Names $r) -eq 'B-deren,C' -and $r.Conflicts.Count -eq 0)
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @((Edit $mA 'A-meins'), $mB, $mC)) -Theirs (MkL @($mB, $mC))
+Check 'Zusammenfuehren: der andere loescht A, ich habe A geaendert -> Konflikt DereLoeschung' ($r.Conflicts.Count -eq 1 -and $r.Conflicts[0].Kind -eq 'DereLoeschung' -and (Names $r) -eq 'B,C')
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @((Edit $mA 'A-meins'), $mB, $mC)) -Theirs (MkL @($mB, $mC)) -Choices @{ $mA['Id'] = 'Mine' }
+Check 'Zusammenfuehren: Konflikt Loeschung, Wahl "meine Fassung" behaelt mein A' ((Names $r) -eq 'A-meins,B,C')
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @($mB, $mC)) -Theirs (MkL @((Edit $mA 'A-deren'), $mB, $mC))
+Check 'Zusammenfuehren: ich loesche A, der andere hat A geaendert -> Konflikt MeineLoeschung (ohne Wahl bleibt A)' ($r.Conflicts.Count -eq 1 -and $r.Conflicts[0].Kind -eq 'MeineLoeschung' -and (Names $r) -eq 'A-deren,B,C')
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @($mB, $mC)) -Theirs (MkL @((Edit $mA 'A-deren'), $mB, $mC)) -Choices @{ $mA['Id'] = 'Mine' }
+Check 'Zusammenfuehren: Konflikt Loeschung, Wahl "meine Fassung" loescht A' ((Names $r) -eq 'B,C')
+$r = Merge-SmProjectLists -Base $baseL -Mine (MkL @($mB, $mC)) -Theirs (MkL @($mB, $mC))
+Check 'Zusammenfuehren: beide loeschen A -> weg, kein Konflikt' ($r.Conflicts.Count -eq 0 -and (Names $r) -eq 'B,C')
+Check 'Zusammenfuehren: Ergebnis ist eine gueltige Liste, Fragetexte nennen Projekt und Seite' ((-not (Throws { ConvertTo-SmProjectList $r.List })) -and (Format-SmMergeQuestion ([pscustomobject]@{ Kind = 'DereLoeschung'; Name = 'A' })) -match 'geloescht' -and (Format-SmMergeQuestion ([pscustomobject]@{ Kind = 'Beide'; Name = 'A' })) -match 'meine Fassung')
+Check 'Seite: Konflikt-Feld bietet Zusammenfuehren an' ([IO.File]::ReadAllText((Join-Path $Repo 'UI\Projekte.xaml')) -match 'BtnConflictMerge' -and (Get-SmProjectUiNames) -contains 'BtnConflictMerge')
+
 # ---------------------------------------------------------------- 5. Meldungen ohne Links und Kennwoerter
 $msg = Get-SmSafeMessage ("Fehler bei $linkP mit $pw und https://x.sharepoint.com/abc und 'foo.sharepoint.com'") @($linkP, $pw)
 Check 'Meldungen: Link, Kennwort und Adressen werden entfernt' ($msg -notmatch 'sharepoint' -and $msg -notmatch [regex]::Escape($pw) -and $msg -notmatch 'https?://')
@@ -183,7 +255,7 @@ $folder = '/personal/max_contoso_com/Documents/Projektliste Test'
 $linkM = "$base/:f:/g/personal/max_contoso_com/EAbcDEF?e=x1Y2z3"
 $store = [hashtable]::Synchronized(@{})     # Dateiname -> Bytes
 $vers = [hashtable]::Synchronized(@{})      # Dateiname -> Versionszaehler (Teil des ETag)
-$flags = [hashtable]::Synchronized(@{ IgnoreIfMatch = $false; Puts = 0; Adds = 0 })
+$flags = [hashtable]::Synchronized(@{ IgnoreIfMatch = $false; Puts = 0; Adds = 0; OmitEtag = $false; LieLength = $false; BigBody = $false; Redirect = $false })
 $listener = New-Object Net.HttpListener
 $listener.Prefixes.Add("$base/"); $listener.Prefixes.Add("http://127.0.0.1:$port/")
 $listener.Start()
@@ -200,7 +272,7 @@ $server = [powershell]::Create(); $server.Runspace = $rs
             try { $c = $listener.GetContext() } catch { break }
             $q = $c.Request; $res = $c.Response
             $raw = [uri]::UnescapeDataString($q.RawUrl)
-            $body = $null; $status = 200; $type = 'application/json'
+            $body = $null; $status = 200; $type = 'application/json'; $name = $null
             $guest = $q.Cookies['FedAuth'] -and $q.Cookies['FedAuth'].Value -eq 'gast'
             $etagOf = { param($n) '"{11111111-2222-3333-4444-555555555555},' + $vers[$n] + '"' }
             if ($q.Url.AbsolutePath -eq '/:f:/g/personal/max_contoso_com/EAbcDEF') {
@@ -209,6 +281,7 @@ $server = [powershell]::Create(); $server.Runspace = $rs
                 $res.RedirectLocation = "$base$web/_layouts/15/onedrive.aspx?id=" + [uri]::EscapeDataString($folder) + '&ga=1'
                 $res.Close(); continue
             }
+            elseif ($q.Url.AbsolutePath -eq '/redir/file') { $type = 'application/octet-stream'; $body = [Text.Encoding]::UTF8.GetBytes('umgeleitet') }
             elseif ($q.Url.AbsolutePath -eq "$web/_layouts/15/onedrive.aspx") { $type = 'text/html'; $body = [Text.Encoding]::UTF8.GetBytes('<html>OneDrive</html>') }
             elseif (-not $guest) { $status = 401; $body = [Text.Encoding]::UTF8.GetBytes('{"error":"no guest session"}') }
             elseif ($q.HttpMethod -eq 'POST' -and $raw -eq "$web/_api/contextinfo") { $body = [Text.Encoding]::UTF8.GetBytes('{"FormDigestValue":"digest-123"}') }
@@ -216,13 +289,14 @@ $server = [powershell]::Create(); $server.Runspace = $rs
             elseif ($q.HttpMethod -eq 'GET' -and $raw -match $reMeta) {
                 $name = $Matches[1].Substring([math]::Min($Matches[1].Length, $folder.Length + 1))
                 if ($Matches[1].StartsWith($folder + '/') -and $store.ContainsKey($name)) {
-                    $body = [Text.Encoding]::UTF8.GetBytes('{"ETag":"' + (& $etagOf $name).Replace('"', '\"') + '","Length":"' + $store[$name].Length + '"}')
+                    $body = [Text.Encoding]::UTF8.GetBytes('{"ETag":"' + (& $etagOf $name).Replace('"', '\"') + '","Length":"' + $(if ($flags.LieLength) { 100 } else { $store[$name].Length }) + '"}')
                 }
                 else { $status = 404; $body = [Text.Encoding]::UTF8.GetBytes('{"error":"not found"}') }
             }
             elseif ($q.HttpMethod -eq 'GET' -and $raw -match $reValue) {
                 $name = $Matches[1].Substring([math]::Min($Matches[1].Length, $folder.Length + 1))
-                if ($Matches[1].StartsWith($folder + '/') -and $store.ContainsKey($name)) { $type = 'application/octet-stream'; $body = $store[$name] } else { $status = 404 }
+                if ($flags.Redirect) { $res.StatusCode = 302; $res.RedirectLocation = "http://127.0.0.1:$($q.Url.Port)/redir/file"; $res.Close(); continue }
+                if ($Matches[1].StartsWith($folder + '/') -and $store.ContainsKey($name)) { $type = 'application/octet-stream'; $body = if ($flags.BigBody) { New-Object byte[] (21MB) } else { $store[$name] } } else { $status = 404 }
             }
             elseif ($q.HttpMethod -eq 'POST' -and $raw -match $reValue) {
                 $name = $Matches[1].Substring([math]::Min($Matches[1].Length, $folder.Length + 1))
@@ -245,6 +319,7 @@ $server = [powershell]::Create(); $server.Runspace = $rs
                 }
             }
             else { $status = 404 }
+            if ($name -and -not $flags.OmitEtag -and $q.HttpMethod -eq 'POST' -and $status -eq 200 -and $store.ContainsKey($name)) { $res.AddHeader('ETag', (& $etagOf $name)) }
             $res.StatusCode = $status; $res.ContentType = $type
             if ($body) { $res.OutputStream.Write($body, 0, $body.Length) }
             $res.Close()
@@ -310,6 +385,29 @@ try {
     $store[$fname] = $good
 
     # Ablageort ohne ETag-Angabe darf nie stillschweigend speichern
+    $vers2 = $vers[$fname]
+    # ETag aus der Antwort des PUT; fehlt er dort: $null, keine zweite Abfrage
+    $rE = Read-SmProjectStore -Share $share -Password $pw
+    $putOk = Save-SmProjectStore -Share $share -Password $pw -List $rE.List -ETag $rE.ETag
+    Check 'PUT: ETag kommt aus der Antwort des Schreibens und passt zum Stand im Ablageort' ($putOk.Ok -and $putOk.ETag -eq ('"{11111111-2222-3333-4444-555555555555},' + $vers[$fname] + '"'))
+    $flags.OmitEtag = $true
+    $rE = Read-SmProjectStore -Share $share -Password $pw
+    $putNo = Save-SmProjectStore -Share $share -Password $pw -List $rE.List -ETag $rE.ETag
+    Check 'PUT ohne ETag in der Antwort: gespeichert, ETag = $null (vor dem naechsten Speichern wird neu geladen)' ($putNo.Ok -and $null -eq $putNo.ETag)
+    $flags.OmitEtag = $false
+    $rF = Read-SmProjectStore -Share $share -Password $pw
+    Check 'Nach einem Speichern ohne ETag liefert das Neuladen wieder einen ETag' ($rF.Exists -and $rF.ETag -and (Json $rF.List) -eq (Json $rE.List))
+
+    # Weiterleitungsziel und Groesse beim Lesen
+    $flags.Redirect = $true
+    Check 'Lesen: Weiterleitung auf anderes Ziel wird abgelehnt' (ThrowsLike { Read-SmProjectStore -Share $share -Password $pw } 'unerlaubten Ziel')
+    $flags.Redirect = $false
+    $flags.LieLength = $true; $flags.BigBody = $true
+    Check 'Lesen: tatsaechlich grosser Body (21 MB) wird trotz kleiner Laengenangabe abgelehnt' (ThrowsLike { Read-SmProjectStore -Share $share -Password $pw } 'ungewoehnlich gross')
+    $flags.LieLength = $false; $flags.BigBody = $false
+    Check 'Lesen: nach den Fehlerfaellen wieder normal' ((Read-SmProjectStore -Share $share -Password $pw).Exists)
+    Check 'Weiterleitungsziel: https auf *.sharepoint.com erlaubt, alles andere nicht' ((Test-SmFinalHost -Final ([uri]'https://contoso-my.sharepoint.com/x')) -and -not (Test-SmFinalHost -Final ([uri]'http://contoso-my.sharepoint.com/x')) -and -not (Test-SmFinalHost -Final ([uri]'https://evil.example.com/x')) -and -not (Test-SmFinalHost -Final ([uri]'https://sharepoint.com.evil.net/x')))
+
     $vers2 = $vers[$fname]
     Check 'Speichern ohne ETag auf vorhandener Datei: Konflikt' ((Save-SmProjectStore -Share $share -Password $pw -List $list -ETag $null).Conflict -and $vers[$fname] -eq $vers2)
 }

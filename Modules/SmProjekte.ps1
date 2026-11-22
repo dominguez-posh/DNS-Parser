@@ -14,7 +14,9 @@
         32 Byte HMAC-SHA256 ueber alles davor (encrypt-then-MAC)
     Schluessel: PBKDF2-SHA256 (Rfc2898DeriveBytes mit HashAlgorithmName) liefert 64 Byte, 32 fuer AES, 32 fuer HMAC.
     Der Inhalt traegt eine eigene Schemaversion (Schema), damit spaetere Phasen je Projekt Ergebnisse (Results) ergaenzen koennen.
-    Das Kennwort bleibt im Speicher. Optional merkt sich der Rechner Link und Kennwort per DPAPI (CurrentUser).
+    Das Kennwort bleibt im Speicher. Optional merkt sich der Rechner Link und Kennwort per DPAPI (CurrentUser, in %LOCALAPPDATA%).
+    Grenze: wer den Ordnerlink hat, kann eine aeltere Fassung der Datei wieder einspielen (Rollback); sie bleibt verschluesselt, ist aber veraltet.
+    Je Projekt merkt sich die Datei die bestaetigten Link-Hosts (ShareHostConfirmed); ein Import bringt sie nie mit.
     Links, Kennwoerter und Schluessel kommen in keine Meldung und kein Protokoll (Sicherheits-Checkliste Punkt 6).
     Windows PowerShell 5.1, .NET 4.7.2 oder neuer. Datei bleibt ASCII.
 #>
@@ -27,7 +29,7 @@ $script:SmProjMinIter = 200000
 $script:SmProjMaxIter = 5000000
 $script:SmProjDefaultIter = 250000
 $script:SmProjMaxBytes = 20MB
-$script:SmProjMinPassword = 8
+$script:SmProjMinPassword = 12
 $script:SmProjRoles = @('DNS', 'DHCP', 'Print', 'DC')
 $script:SmProjGenerations = @('alt', 'neu')
 $script:SmProjStatus = @('Geplant', 'Laufend', 'Abgeschlossen', 'Archiviert')
@@ -103,7 +105,7 @@ function Protect-SmProjectData {
         Verschluesselt ein Objekt (Projektliste oder Einzelprojekt) mit einem Kennwort. Liefert die Bytes der .smproj-Datei.
     #>
     param([Parameter(Mandatory)]$Data, [Parameter(Mandatory)][string]$Password, [int]$Iterations = $script:SmProjDefaultIter)
-    if ($Password.Length -lt $script:SmProjMinPassword) { throw "Das Kennwort ist zu kurz (mindestens $script:SmProjMinPassword Zeichen)." }
+    if ($Password.Length -lt $script:SmProjMinPassword) { throw "Das Kennwort ist zu kurz (mindestens $script:SmProjMinPassword Zeichen, besser eine Passphrase)." }
     if ($Iterations -lt $script:SmProjMinIter -or $Iterations -gt $script:SmProjMaxIter) { throw 'Ungueltige Iterationszahl.' }
     $json = ConvertTo-Json -InputObject (ConvertTo-SmPlain $Data) -Depth 32 -Compress
     $plain = [Text.Encoding]::UTF8.GetBytes($json)
@@ -233,6 +235,9 @@ function ConvertTo-SmProjectRecord {
         Notes = (Assert-SmText $p['Notes'] 'Notizen' 20000 -Multiline); ShareLink = $link; Servers = $servers.ToArray()
         Status = $status; Created = $created; Modified = $modified; Results = $results
     }
+    $hosts = New-Object System.Collections.Generic.List[string]
+    foreach ($h in @($p['ShareHostConfirmed'])) { $hs = ([string]$h).ToLowerInvariant(); if ($hs -match '^[a-z0-9.\-]{1,253}$' -and -not $hosts.Contains($hs)) { $hosts.Add($hs) } }
+    $out['ShareHostConfirmed'] = $hosts.ToArray()
     foreach ($k in $p.Keys) { if (-not $out.Contains($k)) { $out[$k] = $p[$k] } }
     $out
 }
@@ -297,6 +302,118 @@ function Find-SmProjects {
     @($hit | Sort-Object { $_['Name'] })
 }
 
+# ---------------------------------------------------------------- Link-Host bestaetigen (fremder Tenant)
+
+function Get-SmShareHost {
+    <# Host des Tauschordner-Links in Kleinschreibung (z. B. contoso-my.sharepoint.com); $null, wenn kein Link. #>
+    param([string]$Link)
+    if (-not $Link) { return $null }
+    try { ([uri]$Link).Host.ToLowerInvariant() } catch { $null }
+}
+
+function Test-SmShareHostConfirmed {
+    <# $true, wenn das Projekt keinen Link hat oder der Host seines Links schon bestaetigt ist. #>
+    param([Parameter(Mandatory)]$Project)
+    $h = Get-SmShareHost ([string]$Project['ShareLink'])
+    if (-not $h) { return $true }
+    @($Project['ShareHostConfirmed']) -contains $h
+}
+
+function Set-SmShareHostConfirmed {
+    <# Liefert eine Kopie des Projekts, in der der Host seines Links als bestaetigt vermerkt ist. #>
+    param([Parameter(Mandatory)]$Project)
+    $p = Copy-SmData $Project
+    $h = Get-SmShareHost ([string]$p['ShareLink'])
+    if ($h -and (@($p['ShareHostConfirmed']) -notcontains $h)) { $p['ShareHostConfirmed'] = @(@($p['ShareHostConfirmed']) + $h) }
+    ConvertTo-SmProjectRecord $p
+}
+
+function Get-SmImportInfo {
+    <# Vergleicht ein importiertes Projekt mit dem gleichen in der Liste (oder $null). Liefert, was der Dialog zeigen muss. #>
+    param([Parameter(Mandatory)]$Imported, $Existing)
+    $newHost = Get-SmShareHost ([string]$Imported['ShareLink'])
+    $oldHost = if ($Existing) { Get-SmShareHost ([string]$Existing['ShareLink']) } else { $null }
+    $linkNew = if ($Existing) { [string]$Imported['ShareLink'] -ne [string]$Existing['ShareLink'] } else { [bool]$Imported['ShareLink'] }
+    [pscustomobject]@{
+        Exists = [bool]$Existing; NameOld = if ($Existing) { [string]$Existing['Name'] } else { $null }; NameNew = [string]$Imported['Name']
+        HostOld = $oldHost; HostNew = $newHost
+        NeedsHostConfirm = [bool]($newHost -and $linkNew -and -not ($Existing -and (@($Existing['ShareHostConfirmed']) -contains $newHost)))
+    }
+}
+
+function Format-SmImportReplaceText {
+    param([Parameter(Mandatory)]$Info)
+    $old = if ($Info.HostOld) { $Info.HostOld } else { '(kein Link)' }; $new = if ($Info.HostNew) { $Info.HostNew } else { '(kein Link)' }
+    "Das Projekt gibt es in der Liste schon.`n`nVorhanden: $($Info.NameOld)`nTauschordner-Host: $old`n`nImportiert: $($Info.NameNew)`nTauschordner-Host: $new`n`nJa = ersetzen, Nein = als Kopie anlegen."
+}
+
+function Format-SmHostConfirmText {
+    param([Parameter(Mandatory)][string]$HostName, [string]$ProjectName = '')
+    "Das Projekt `"$ProjectName`" nutzt einen Tauschordner auf:`n`n$HostName`n`nNur bestaetigen, wenn das der SharePoint des Kunden oder Ihrer Firma ist. Ein fremder Tenant koennte Dateien mitlesen oder unterschieben."
+}
+
+# ---------------------------------------------------------------- Zusammenfuehren bei Konflikt
+
+function ConvertTo-SmSorted {
+    <# Gleicher Inhalt in fester Schluesselreihenfolge, fuer den Vergleich zweier Projekte. #>
+    param($Obj)
+    if ($Obj -is [System.Collections.IDictionary]) { $h = [ordered]@{}; foreach ($k in ($Obj.Keys | Sort-Object { [string]$_ })) { $h[[string]$k] = ConvertTo-SmSorted $Obj[$k] }; return $h }
+    if ($Obj -is [System.Collections.IEnumerable] -and $Obj -isnot [string]) { $l = New-Object System.Collections.Generic.List[object]; foreach ($i in $Obj) { $l.Add((ConvertTo-SmSorted $i)) }; return , $l.ToArray() }
+    $Obj
+}
+
+function Test-SmSameProject {
+    param($A, $B)
+    if ($null -eq $A -or $null -eq $B) { return ($null -eq $A -and $null -eq $B) }
+    (ConvertTo-Json -InputObject (ConvertTo-SmSorted (ConvertTo-SmPlain $A)) -Depth 32 -Compress) -ceq (ConvertTo-Json -InputObject (ConvertTo-SmSorted (ConvertTo-SmPlain $B)) -Depth 32 -Compress)
+}
+
+function Merge-SmProjectLists {
+    <#
+    .SYNOPSIS
+        Dreiwege-Zusammenfuehrung je Projekt: Base = Stand beim Laden, Mine = meine Liste, Theirs = aktueller Stand im Ablageort.
+        Hat nur eine Seite ein Projekt geaendert (auch neu angelegt oder geloescht), gilt ihre Fassung. Haben beide dasselbe Projekt
+        verschieden geaendert, entsteht ein Konflikt; Choices[Id] = 'Mine' oder 'Theirs' entscheidet (ohne Eintrag gilt Theirs, Unresolved zaehlt).
+        Geaendert heisst: Inhalt des Projekts weicht vom Stand beim Laden ab (genauer als der Zeitstempel Modified).
+        Liefert List und Conflicts (Id, Name, Kind: Beide, MeineLoeschung, DereLoeschung).
+    #>
+    param([Parameter(Mandatory)]$Base, [Parameter(Mandatory)]$Mine, [Parameter(Mandatory)]$Theirs, [hashtable]$Choices = @{})
+    $idx = { param($l) $h = [ordered]@{}; foreach ($p in @($l['Projects'])) { $h[[string]$p['Id']] = $p }; $h }
+    $b = & $idx $Base; $m = & $idx $Mine; $t = & $idx $Theirs
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($src in $t, $m, $b) { foreach ($k in $src.Keys) { if (-not $ids.Contains($k)) { $ids.Add($k) } } }
+    $out = New-Object System.Collections.Generic.List[object]; $conflicts = New-Object System.Collections.Generic.List[object]; $unresolved = 0
+    foreach ($id in $ids) {
+        $bp = $b[$id]; $mp = $m[$id]; $tp = $t[$id]
+        $mineChanged = -not (Test-SmSameProject $bp $mp); $theirChanged = -not (Test-SmSameProject $bp $tp)
+        $pick = $null
+        if (-not $mineChanged) { $pick = 'Theirs' }
+        elseif (-not $theirChanged) { $pick = 'Mine' }
+        elseif (Test-SmSameProject $mp $tp) { $pick = 'Theirs' }
+        else {
+            $kind = if ($null -eq $mp) { 'MeineLoeschung' } elseif ($null -eq $tp) { 'DereLoeschung' } else { 'Beide' }
+            $name = if ($tp) { [string]$tp['Name'] } elseif ($mp) { [string]$mp['Name'] } else { [string]$bp['Name'] }
+            $conflicts.Add([pscustomobject]@{ Id = $id; Name = $name; Kind = $kind })
+            $c = [string]$Choices[$id]
+            if ($c -ceq 'Mine' -or $c -ceq 'Theirs') { $pick = $c } else { $pick = 'Theirs'; $unresolved++ }
+        }
+        $chosen = if ($pick -eq 'Mine') { $mp } else { $tp }
+        if ($null -ne $chosen) { $out.Add($chosen) }
+    }
+    $list = Copy-SmData $Theirs
+    $list['Projects'] = $out.ToArray()
+    [pscustomobject]@{ List = (ConvertTo-SmProjectList $list); Conflicts = $conflicts.ToArray(); Unresolved = $unresolved }
+}
+
+function Format-SmMergeQuestion {
+    param([Parameter(Mandatory)]$Conflict)
+    switch ($Conflict.Kind) {
+        'MeineLoeschung' { "Das Projekt `"$($Conflict.Name)`" hast du geloescht, der andere hat es geaendert.`n`nJa = geloescht lassen (meine Fassung), Nein = Projekt behalten (deren Fassung)." }
+        'DereLoeschung' { "Das Projekt `"$($Conflict.Name)`" hast du geaendert, der andere hat es geloescht.`n`nJa = mit meinen Aenderungen behalten (meine Fassung), Nein = geloescht lassen (deren Fassung)." }
+        default { "Das Projekt `"$($Conflict.Name)`" wurde von dir und vom anderen geaendert.`n`nJa = meine Fassung, Nein = deren Fassung." }
+    }
+}
+
 # ---------------------------------------------------------------- Export und Import eines Projekts
 
 function Export-SmProject {
@@ -313,7 +430,9 @@ function Import-SmProject {
     if ($d['Kind'] -ne 'Project') { throw 'Das ist keine exportierte Projektdatei (eventuell die ganze Projektliste).' }
     $schema = 0
     if (-not [int]::TryParse([string]$d['Schema'], [ref]$schema) -or $schema -lt 1 -or $schema -gt $script:SmProjSchema) { throw 'Die Projektdatei hat eine unbekannte Schemaversion. Bitte das Tool aktualisieren.' }
-    ConvertTo-SmProjectRecord $d['Project']
+    $rec = ConvertTo-SmProjectRecord $d['Project']
+    $rec['ShareHostConfirmed'] = @()   # bestaetigte Hosts bringt keine fremde Datei mit: Bestaetigung nur durch den Anwender
+    $rec
 }
 
 # ---------------------------------------------------------------- Ablage auf dem Freigabelink (mit ETag)
@@ -348,6 +467,8 @@ function Read-SmProjectStore {
         $u = '{0}/_api/web/GetFileByServerRelativeUrl(@f)/$value?@f={1}' -f $Share.Web, (Format-SmSpString ($Share.Folder + '/' + $script:SmProjFileName))
         try { $resp = Invoke-WebRequest -Uri $u -WebSession $Share.Session -UseBasicParsing -ErrorAction Stop -Headers @{ Accept = 'application/octet-stream' } }
         catch { throw ('Die Projektliste ist nicht lesbar: ' + (Get-SmSafeMessage $_.Exception.Message @($Share.Link))) }
+        if (-not (Test-SmFinalHost -Final (Get-SmFinalUri $resp) -Authority ([string]$Share.Authority) -AnyHost:([bool]$Share.AnyHost))) { throw 'Die Projektdatei wurde von einem unerlaubten Ziel geliefert (erlaubt: https auf *.sharepoint.com). Abgebrochen.' }
+        if ($resp.RawContentStream.Length -gt $script:SmProjMaxBytes) { throw 'Die Projektdatei im Ablageort ist ungewoehnlich gross und wird nicht gelesen.' }
         $bytes = $resp.RawContentStream.ToArray()
         $after = Get-SmProjectFileMeta -Share $Share
         if ($after -and $after.ETag -eq $meta.ETag) {
@@ -363,7 +484,7 @@ function Send-SmProjectBytes {
     <#
     .SYNOPSIS
         Schreibt die Bytes in die Projektdatei. Mit ETag: ersetzt nur, wenn die Datei noch diesen Stand hat (If-Match).
-        Ohne ETag: legt die Datei neu an und scheitert, wenn es sie schon gibt. Liefert Ok/Conflict.
+        Ohne ETag: legt die Datei neu an und scheitert, wenn es sie schon gibt. Liefert Ok/Conflict und den ETag aus der Antwort (oder $null).
     #>
     param([Parameter(Mandatory)]$Share, [Parameter(Mandatory)][byte[]]$Bytes, [string]$ETag)
     $digest = Get-SmShareDigest -Share $Share
@@ -371,11 +492,11 @@ function Send-SmProjectBytes {
     try {
         if ($ETag) {
             $u = '{0}/_api/web/GetFileByServerRelativeUrl(@f)/$value?@f={1}' -f $Share.Web, (Format-SmSpString ($Share.Folder + '/' + $script:SmProjFileName))
-            $null = Invoke-SmShareApi -Share $Share -Uri $u -Method Post -Body $Bytes -Headers @{ 'X-RequestDigest' = $digest; 'If-Match' = $ETag; 'X-HTTP-Method' = 'PUT' }
+            $resp = Invoke-SmShareApi -Share $Share -Uri $u -Method Post -Body $Bytes -Headers @{ 'X-RequestDigest' = $digest; 'If-Match' = $ETag; 'X-HTTP-Method' = 'PUT' } -Response
         }
         else {
             $u = "{0}/_api/web/GetFolderByServerRelativeUrl(@f)/Files/add(url='{1}',overwrite=false)?@f={2}" -f $Share.Web, $script:SmProjFileName, $folderArg
-            $null = Invoke-SmShareApi -Share $Share -Uri $u -Method Post -Body $Bytes -Headers @{ 'X-RequestDigest' = $digest }
+            $resp = Invoke-SmShareApi -Share $Share -Uri $u -Method Post -Body $Bytes -Headers @{ 'X-RequestDigest' = $digest } -Response
         }
     }
     catch {
@@ -388,8 +509,12 @@ function Send-SmProjectBytes {
         }
         throw ('Speichern der Projektliste fehlgeschlagen: ' + (Get-SmSafeMessage $_.Exception.Message @($Share.Link)) + ' Ist der Link auf Bearbeiten gestellt?')
     }
-    $meta = Get-SmProjectFileMeta -Share $Share
-    [pscustomobject]@{ Ok = $true; Conflict = $false; ETag = $meta.ETag }
+    # ETag nur aus der Antwort des Schreibens (keine zweite Abfrage, die einen fremden Stand erwischen koennte).
+    # Fehlt er: $null, dann wird vor dem naechsten Speichern neu geladen.
+    $newTag = $null
+    try { $hv = $resp.Headers['ETag']; if ($hv) { $newTag = [string]@($hv)[0] } } catch { }
+    if (-not $newTag) { $newTag = $null }
+    [pscustomobject]@{ Ok = $true; Conflict = $false; ETag = $newTag }
 }
 
 function Save-SmProjectStore {
@@ -410,7 +535,14 @@ function Save-SmProjectStore {
 
 # ---------------------------------------------------------------- Kennwort merken (DPAPI, nur dieser Benutzer auf diesem Rechner)
 
-function Get-SmRememberPath { Join-Path $env:APPDATA 'ServerMigration\verbindung.dat' }
+function Get-SmRememberPath { Join-Path $env:LOCALAPPDATA 'ServerMigration\verbindung.dat' }   # lokal, nicht im Roaming-Profil
+
+function Remove-SmLegacyRemembered {
+    <# Fruehere Fassungen legten die Datei in %APPDATA% (Roaming) ab: einmalig loeschen. #>
+    param([string]$Path = (Join-Path $env:APPDATA 'ServerMigration\verbindung.dat'))
+    try { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force; return $true } } catch { }
+    $false
+}
 
 function Save-SmRemembered {
     param([Parameter(Mandatory)][string]$Link, [Parameter(Mandatory)][string]$Password, [string]$Path = (Get-SmRememberPath))
@@ -448,7 +580,7 @@ function Get-SmProjectPageXaml {
 }
 
 function Get-SmProjectUiNames {
-    @('TxtListLink', 'PwdList', 'ChkRemember', 'BtnListConnect', 'BtnListNew', 'BtnListReload', 'BtnForget', 'TxtListState', 'BoxConflict', 'TxtConflict', 'BtnConflictReload',
+    @('TxtListLink', 'PwdList', 'ChkRemember', 'BtnListConnect', 'BtnListNew', 'BtnListReload', 'BtnForget', 'TxtListState', 'BoxConflict', 'TxtConflict', 'BtnConflictReload', 'BtnConflictMerge',
         'TxtSearch', 'LstProjects', 'TxtActive', 'BtnProjNew', 'BtnProjEdit', 'BtnProjDelete', 'BtnProjActivate', 'BtnProjExport', 'BtnProjImport', 'TxtListEmpty',
         'BoxEditor', 'TxtEditorTitle', 'TxtName', 'TxtCustomer', 'CmbStatus', 'TxtShare', 'TxtNotes', 'LstServers', 'TxtSrvName', 'CmbSrvRole', 'CmbSrvGen', 'BtnSrvAdd', 'BtnSrvRemove',
         'BtnProjSave', 'BtnProjCancel', 'TxtEditorError')
@@ -468,6 +600,7 @@ function Get-SmPasswordDialogXaml {
             <TextBlock Text="Kennwort wiederholen" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
             <PasswordBox x:Name="PwdDlg2" Padding="8,6" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="Kennwort wiederholen"/>
         </StackPanel>
+        <TextBlock x:Name="TxtDlgHint" Style="{DynamicResource Hint}" Margin="0,8,0,0" Visibility="Collapsed" TextWrapping="Wrap" Text="Passphrase empfohlen: mehrere Woerter, mindestens 12 Zeichen. Wer die Datei bekommt, kann das Kennwort beliebig oft durchprobieren."/>
         <TextBlock x:Name="TxtDlgError" Foreground="{DynamicResource DangerText}" TextWrapping="Wrap" Margin="0,8,0,0"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button x:Name="BtnDlgOk" Content="OK" Style="{DynamicResource PrimaryButton}" IsDefault="True" Margin="0,0,8,0" MinWidth="80"/>
@@ -487,7 +620,7 @@ function Show-SmPasswordDialog {
     $win.Title = $Title
     $win.FindName('TxtDlgTitle').Text = $Title
     $win.FindName('TxtDlgText').Text = $Text
-    if ($Confirm) { $win.FindName('BoxDlg2').Visibility = 'Visible' }
+    if ($Confirm) { $win.FindName('BoxDlg2').Visibility = 'Visible'; $win.FindName('TxtDlgHint').Visibility = 'Visible' }
     $state = @{ Value = $null; Confirm = [bool]$Confirm; Win = $win; Min = $script:SmProjMinPassword }   # der Handler ist ein Closure: kein $script: darin
     $win.FindName('BtnDlgOk').Add_Click({
             $w = $state.Win
@@ -512,7 +645,7 @@ function Initialize-SmProjectPage {
         ($project ist $null, wenn keins mehr aktiv ist); die Seite "Tauschordner" uebernimmt daraus den Link.
     #>
     param([Parameter(Mandatory)]$Ui, [Parameter(Mandatory)][string[]]$JobModules, [Parameter(Mandatory)][scriptblock]$AddLog, [scriptblock]$OnActiveChanged)
-    $script:SmProj = @{ Ui = $Ui; Modules = $JobModules; Log = $AddLog; OnActive = $OnActiveChanged; Link = $null; Password = $null; ETag = $null; List = $null; ActiveId = $null; Editing = $null; EditServers = @(); Busy = $false; Pending = $null }
+    $script:SmProj = @{ Ui = $Ui; Modules = $JobModules; Log = $AddLog; OnActive = $OnActiveChanged; Link = $null; Password = $null; ETag = $null; List = $null; ActiveId = $null; Editing = $null; EditServers = @(); Busy = $false; Pending = $null; Merge = $null }
     $st = $script:SmProj
     foreach ($s in $script:SmProjStatus) { [void]$Ui.CmbStatus.Items.Add($s) }
     foreach ($s in $script:SmProjRoles) { [void]$Ui.CmbSrvRole.Items.Add($s) }
@@ -522,7 +655,8 @@ function Initialize-SmProjectPage {
 
     $Ui.BtnListConnect.Add_Click({ Start-SmProjConnect })
     $Ui.BtnListReload.Add_Click({ Start-SmProjConnect -Reload })
-    $Ui.BtnConflictReload.Add_Click({ Start-SmProjConnect -Reload })
+    $Ui.BtnConflictReload.Add_Click({ $script:SmProj.Merge = $null; Start-SmProjConnect -Reload })
+    $Ui.BtnConflictMerge.Add_Click({ Start-SmProjMerge })
     $Ui.BtnListNew.Add_Click({ Start-SmProjCreateList })
     $Ui.BtnForget.Add_Click({ Clear-SmRemembered; $script:SmProj.Ui.BtnForget.Visibility = 'Collapsed'; $script:SmProj.Ui.ChkRemember.IsChecked = $false; & $script:SmProj.Log 'Gemerkte Verbindung auf diesem Rechner geloescht'; Show-SmToast 'Gemerkte Verbindung geloescht.' })
     $Ui.TxtSearch.Add_TextChanged({ Update-SmProjectPage })
@@ -539,6 +673,7 @@ function Initialize-SmProjectPage {
     $Ui.BtnProjExport.Add_Click({ Export-SmProjSelected })
     $Ui.BtnProjImport.Add_Click({ Import-SmProjFromFile })
 
+    [void](Remove-SmLegacyRemembered)
     $r = Get-SmRemembered
     if ($r) {
         $Ui.TxtListLink.Text = $r.Link; $Ui.PwdList.Password = $r.Password; $Ui.ChkRemember.IsChecked = $true; $Ui.BtnForget.Visibility = 'Visible'
@@ -611,7 +746,7 @@ function Show-SmProjConflict([bool]$Show, [string]$Text = '') {
 }
 
 function Start-SmProjConnect {
-    param([switch]$Reload)
+    param([switch]$Reload, $Then)   # Then = @{ Block; Args }: laeuft nach erfolgreichem Laden
     $st = $script:SmProj; $u = $st.Ui
     if ($st.Busy) { return }
     $link = $null
@@ -621,7 +756,7 @@ function Start-SmProjConnect {
         $pw = $u.PwdList.Password
         if (-not $pw) { $u.TxtListState.Text = 'Bitte das Kennwort eingeben'; return }
     }
-    $st.Pending = @{ Link = $link; Pw = $pw }   # kein Closure (in einem Closure waere $script: nicht die Seite): Zustand im Seitenobjekt
+    $st.Pending = @{ Link = $link; Pw = $pw; Then = $Then }   # kein Closure (in einem Closure waere $script: nicht die Seite): Zustand im Seitenobjekt
     Set-SmProjBusy $true; $u.TxtListState.Text = 'Verbinde und entschluessele ...'; Show-SmProjConflict $false
     & $st.Log 'Projektliste: lade und entschluessele'
     [void](Start-SmJob -Modules $st.Modules -Params @{ Link = $link; Password = $pw } -Script {
@@ -631,7 +766,7 @@ function Start-SmProjConnect {
         } -OnDone {
             param($result, $err)
             $s = $script:SmProj; $ui2 = $s.Ui
-            $link = $s.Pending.Link; $pw = $s.Pending.Pw; $s.Pending = $null
+            $link = $s.Pending.Link; $pw = $s.Pending.Pw; $then = $s.Pending.Then; $s.Pending = $null
             Set-SmProjBusy $false
             if ($err) { $ui2.TxtListState.Text = 'Fehlgeschlagen'; & $s.Log ('Projektliste: ' + (Get-SmSafeMessage $err @($link, $pw))); return }
             $r = $result[-1]
@@ -642,11 +777,13 @@ function Start-SmProjConnect {
             }
             $s.Link = $link; $s.Password = $pw; $s.ETag = $r.ETag; $s.List = $r.List
             if ($ui2.ChkRemember.IsChecked) { try { Save-SmRemembered -Link $link -Password $pw; $ui2.BtnForget.Visibility = 'Visible' } catch { & $s.Log 'Das Kennwort konnte nicht gemerkt werden.' } }
+            else { try { Clear-SmRemembered; $ui2.BtnForget.Visibility = 'Collapsed' } catch { } }
             $ui2.TxtListState.Text = 'Verbunden: {0} Projekte' -f @($r.List['Projects']).Count
             & $s.Log ('Projektliste geladen ({0} Projekte)' -f @($r.List['Projects']).Count)
             if ($s.ActiveId -and -not (Get-SmProjById $s.ActiveId)) { $s.ActiveId = $null; if ($s.OnActive) { & $s.OnActive $null } }
             elseif ($s.ActiveId -and $s.OnActive) { & $s.OnActive (Get-SmProjById $s.ActiveId) }
             Update-SmProjectPage
+            if ($then) { & $then.Block $then.Args }
         })
 }
 
@@ -675,6 +812,7 @@ function Start-SmProjCreateList {
             $s.Link = $link; $s.Password = $pw; $s.ETag = $r.Save.ETag; $s.List = $r.List
             $ui2.PwdList.Password = $pw
             if ($ui2.ChkRemember.IsChecked) { try { Save-SmRemembered -Link $link -Password $pw; $ui2.BtnForget.Visibility = 'Visible' } catch { & $s.Log 'Das Kennwort konnte nicht gemerkt werden.' } }
+            else { try { Clear-SmRemembered; $ui2.BtnForget.Visibility = 'Collapsed' } catch { } }
             $ui2.TxtListState.Text = 'Neue Liste angelegt und verbunden'
             & $s.Log 'Projektliste: neue verschluesselte Liste angelegt'
             Update-SmProjectPage
@@ -691,9 +829,15 @@ function Invoke-SmProjSave {
     param([Parameter(Mandatory)][scriptblock]$Mutate, $Arg, [scriptblock]$OnSaved, [string]$Done = 'Gespeichert')
     $st = $script:SmProj; $u = $st.Ui
     if ($st.Busy -or -not $st.List) { return }
+    if (-not $st.ETag) {   # der Ablageort hat nach dem letzten Speichern keinen ETag geliefert: neu laden, dann speichern
+        & $st.Log 'Projektliste: ETag fehlt, lade vor dem Speichern neu'
+        Start-SmProjConnect -Reload -Then @{ Block = { param($a) Invoke-SmProjSave -Mutate $a.Mutate -Arg $a.Arg -OnSaved $a.OnSaved -Done $a.Done }; Args = @{ Mutate = $Mutate; Arg = $Arg; OnSaved = $OnSaved; Done = $Done } }
+        return
+    }
+    $base = $st.List
     try { $new = & $Mutate (Copy-SmData $st.List) $Arg } catch { $u.TxtEditorError.Text = Get-SmSafeMessage $_.Exception.Message; & $st.Log ('Aenderung abgelehnt: ' + (Get-SmSafeMessage $_.Exception.Message)); return }
     Set-SmProjBusy $true; $u.TxtListState.Text = 'Speichere ...'
-    $st.Pending = @{ Done = $Done; OnSaved = $OnSaved }
+    $st.Pending = @{ Done = $Done; OnSaved = $OnSaved; Base = $base }
     [void](Start-SmJob -Modules $st.Modules -Params @{ Link = $st.Link; Password = $st.Password; List = $new; ETag = $st.ETag } -Script {
             param($State, $P)
             $share = Connect-SmShare -Link $P.Link
@@ -708,17 +852,46 @@ function Invoke-SmProjSave {
             $r = $result[-1]
             if ($r.Save.Conflict) {
                 $ui2.TxtListState.Text = 'Konflikt, nichts gespeichert'
-                Show-SmProjConflict $true 'Jemand anderes hat die Projektliste inzwischen gespeichert. Deine Aenderung wurde NICHT gespeichert, damit nichts ueberschrieben wird. Neu laden und die Aenderung dann noch einmal machen.'
+                $s.Merge = @{ Base = $captured.Base; Mine = $r.List; OnSaved = $captured.OnSaved }
+                Show-SmProjConflict $true 'Jemand anderes hat die Projektliste inzwischen gespeichert. Deine Aenderung wurde NICHT gespeichert, damit nichts ueberschrieben wird. Zusammenfuehren laedt neu und uebernimmt deine Aenderungen je Projekt, Neu laden verwirft sie.'
                 & $s.Log 'Projektliste: Konflikt (ETag), nicht gespeichert'
                 return
             }
-            $s.ETag = $r.Save.ETag; $s.List = $r.List
+            $s.ETag = $r.Save.ETag; $s.List = $r.List; $s.Merge = $null
             $ui2.TxtListState.Text = '{0} ({1} Projekte)' -f $captured.Done, @($r.List['Projects']).Count
             & $s.Log ('Projektliste: ' + $captured.Done)
             if ($captured.OnSaved) { & $captured.OnSaved }
             if ($s.ActiveId -and $s.OnActive) { $a = Get-SmProjById $s.ActiveId; if (-not $a) { $s.ActiveId = $null }; & $s.OnActive $a }
             Update-SmProjectPage
         })
+}
+
+function Start-SmProjMerge {
+    <# Konflikt: neu laden, dann meine Aenderungen je Projekt auf den neuen Stand legen, bei Ueberschneidung fragen. #>
+    $st = $script:SmProj
+    if ($st.Busy -or -not $st.Merge) { return }
+    Start-SmProjConnect -Reload -Then @{ Block = { Complete-SmProjMerge }; Args = $null }
+}
+
+function Complete-SmProjMerge {
+    $st = $script:SmProj; $m = $st.Merge
+    if (-not $m -or -not $st.List) { return }
+    try {
+        $res = Merge-SmProjectLists -Base $m.Base -Mine $m.Mine -Theirs $st.List
+        $choices = @{}
+        foreach ($c in $res.Conflicts) {
+            $ask = [System.Windows.MessageBox]::Show((Format-SmMergeQuestion $c), 'Zusammenfuehren', 'YesNoCancel', 'Question', 'Cancel')
+            if ($ask -eq 'Cancel') { & $st.Log 'Zusammenfuehren abgebrochen, nichts gespeichert'; return }
+            $choices[$c.Id] = if ($ask -eq 'Yes') { 'Mine' } else { 'Theirs' }
+        }
+        $res = Merge-SmProjectLists -Base $m.Base -Mine $m.Mine -Theirs $st.List -Choices $choices
+    }
+    catch { & $st.Log ('Zusammenfuehren fehlgeschlagen: ' + (Get-SmSafeMessage $_.Exception.Message)); return }
+    $st.Merge = $null
+    Show-SmProjConflict $false
+    Invoke-SmProjSave -Done 'Zusammengefuehrt' -Arg $res.List -Mutate { param($l, $a) $a } -OnSaved {
+        $script:SmProj.Editing = $null; $script:SmProj.Ui.BoxEditor.Visibility = 'Collapsed'
+    }
 }
 
 function Open-SmProjEditor {
@@ -794,10 +967,29 @@ function Set-SmProjActive {
     $st = $script:SmProj
     $id = Get-SmProjSelectedId; if (-not $id) { return }
     $p = Get-SmProjById $id; if (-not $p) { return }
+    if (-not (Test-SmShareHostConfirmed $p)) {
+        if ($st.Busy) { return }
+        $h = Get-SmShareHost ([string]$p['ShareLink'])
+        $ask = [System.Windows.MessageBox]::Show((Format-SmHostConfirmText -HostName $h -ProjectName $p['Name']), 'Tauschordner bestaetigen', 'YesNo', 'Warning', 'No')
+        if ($ask -ne 'Yes') { & $st.Log 'Projekt nicht aktiviert (Tauschordner nicht bestaetigt)'; return }
+        $st.Pending = $null
+        Invoke-SmProjSave -Done 'Tauschordner bestaetigt' -Arg @{ Id = $id } -Mutate { param($l, $a) $q = @($l['Projects']) | Where-Object { $_['Id'] -eq $a.Id } | Select-Object -First 1; if (-not $q) { throw 'Das Projekt gibt es nicht mehr.' }; Set-SmProjectInList -List $l -Project (Set-SmShareHostConfirmed $q) -KeepModified } -OnSaved { Complete-SmProjActivate }
+        $st.ActivateId = $id
+        return
+    }
     $st.ActiveId = $id
     & $st.Log ('Aktives Projekt: ' + $p['Name'])
     if ($st.OnActive) { & $st.OnActive $p }
     Update-SmProjectPage
+}
+
+function Complete-SmProjActivate {
+    $st = $script:SmProj
+    $id = $st.ActivateId; $st.ActivateId = $null
+    $p = if ($id) { Get-SmProjById $id } else { $null }
+    if (-not $p) { return }
+    $st.ActiveId = $id
+    & $st.Log ('Aktives Projekt: ' + $p['Name'])
 }
 
 function Export-SmProjSelected {
@@ -829,10 +1021,19 @@ function Import-SmProjFromFile {
     if (-not $pw) { return }
     try { $p = Import-SmProject -Bytes ([IO.File]::ReadAllBytes($dlg.FileName)) -Password $pw }
     catch { & $st.Log ('Import fehlgeschlagen: ' + (Get-SmSafeMessage $_.Exception.Message @($pw))); [System.Windows.MessageBox]::Show((Get-SmSafeMessage $_.Exception.Message @($pw)), 'Import', 'OK', 'Warning') | Out-Null; return }
-    if (Get-SmProjById $p['Id']) {
-        $ask = [System.Windows.MessageBox]::Show(('Das Projekt "{0}" gibt es in der Liste schon. Ja = ersetzen, Nein = als Kopie anlegen.' -f $p['Name']), 'Import', 'YesNoCancel', 'Question', 'Cancel')
+    $existing = Get-SmProjById $p['Id']
+    $info = Get-SmImportInfo -Imported $p -Existing $existing
+    if ($existing) {
+        $ask = [System.Windows.MessageBox]::Show((Format-SmImportReplaceText $info), 'Import', 'YesNoCancel', 'Question', 'Cancel')
         if ($ask -eq 'Cancel') { return }
-        if ($ask -eq 'No') { $p['Id'] = [guid]::NewGuid().ToString(); $p['Name'] = ($p['Name'] + ' (Kopie)') }
+        if ($ask -eq 'No') { $p['Id'] = [guid]::NewGuid().ToString(); $p['Name'] = ($p['Name'] + ' (Kopie)'); $existing = $null; $info = Get-SmImportInfo -Imported $p -Existing $null }
+    }
+    if ($existing) { $p['ShareHostConfirmed'] = @($existing['ShareHostConfirmed']) }   # bereits bestaetigte Hosts des vorhandenen Projekts bleiben
+    if ($info.NeedsHostConfirm) {
+        $q = (Format-SmHostConfirmText -HostName $info.HostNew -ProjectName $p['Name']) + "`n`nJa = Link uebernehmen, Nein = Projekt ohne Link importieren, Abbrechen = nichts importieren."
+        $ans = [System.Windows.MessageBox]::Show($q, 'Tauschordner bestaetigen', 'YesNoCancel', 'Warning', 'Cancel')
+        if ($ans -eq 'Cancel') { & $st.Log 'Import abgebrochen (Tauschordner nicht bestaetigt)'; return }
+        if ($ans -eq 'Yes') { $p = Set-SmShareHostConfirmed $p } else { $p['ShareLink'] = ''; & $st.Log 'Import ohne Tauschordner-Link' }
     }
     Invoke-SmProjSave -Done 'Projekt importiert' -Arg $p -Mutate { param($l, $a) Set-SmProjectInList -List $l -Project $a -KeepModified }
 }
