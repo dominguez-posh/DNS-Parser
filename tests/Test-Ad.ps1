@@ -16,7 +16,7 @@ if ($PSVersionTable.PSVersion.Major -eq 5) { $env:PSModulePath = (($env:PSModule
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $startTime = Get-Date
 $work = Join-Path $env:TEMP ('sm-ad-test-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
-Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'sm-ad-test-*' -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }   # Reste frueherer Laeufe dieses Tests
+Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'sm-ad-test-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-2) } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }   # nur alte Reste (>2 h); Ordner paralleler Laeufe anderer Worktrees bleiben unberuehrt
 New-Item -ItemType Directory -Force $work | Out-Null
 $script:fails = 0
 function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "OK   $Name" -ForegroundColor Green } else { Write-Host "FAIL $Name" -ForegroundColor Red; $script:fails++ } }
@@ -77,8 +77,11 @@ class P { static int Main(string[] a) {
   string name = Path.GetFileNameWithoutExtension(System.Reflection.Assembly.GetExecutingAssembly().Location).ToLower();
   File.AppendAllText(Path.Combine(dir, name + ".args.log"), string.Join("|", a) + "\r\n");
   File.AppendAllText(Path.Combine(dir, name + ".path.log"), System.Reflection.Assembly.GetExecutingAssembly().Location + "\r\n");
-  string stdin = Console.In.ReadToEnd();
-  File.AppendAllText(Path.Combine(dir, name + ".stdin.log"), stdin + "\r\n---\r\n");
+  // Rohbytes der Standardeingabe (ohne Dekodierung, damit ein BOM sichtbar bleibt); das Textlog zeigt jedes Byte als Latin-1-Zeichen
+  var ms = new MemoryStream(); using (var si = Console.OpenStandardInput()) si.CopyTo(ms);
+  byte[] raw = ms.ToArray();
+  using (var fs = new FileStream(Path.Combine(dir, name + ".stdin.bin"), FileMode.Append)) fs.Write(raw, 0, raw.Length);
+  File.AppendAllText(Path.Combine(dir, name + ".stdin.log"), System.Text.Encoding.GetEncoding(28591).GetString(raw) + "\r\n---\r\n");
   string key = name;
   if (name == "repadmin" && a.Length > 0) key = name + "." + a[0].Trim('/').ToLower();
   if (name == "dcdiag") { foreach (var x in a) if (x.StartsWith("/test:")) key = name + "." + x.Substring(6); }
@@ -103,8 +106,9 @@ $env:SM_STUB_DIR = $stubDir
 $script:SmAdToolPaths = @{ repadmin = (Join-Path $stubDir 'repadmin.exe'); dcdiag = (Join-Path $stubDir 'dcdiag.exe'); ntdsutil = (Join-Path $stubDir 'ntdsutil.exe') }
 function SetStub([string]$Name, [string]$Text) { [IO.File]::WriteAllText((Join-Path $stubDir "$Name.out"), $Text) }
 function ClearStub([string]$Name) { Remove-Item -LiteralPath (Join-Path $stubDir "$Name.out") -Force -ErrorAction SilentlyContinue }
-function ResetStubLogs { Get-ChildItem $stubDir -Filter *.log | Remove-Item -Force }
+function ResetStubLogs { Get-ChildItem $stubDir | Where-Object { $_.Extension -in '.log', '.bin' } | Remove-Item -Force }
 function StubArgs([string]$Name) { $f = Join-Path $stubDir "$Name.args.log"; if (Test-Path $f) { @(Get-Content -LiteralPath $f) } else { @() } }
+function StubBytes([string]$Name) { $f = Join-Path $stubDir "$Name.stdin.bin"; if (Test-Path $f) { , [IO.File]::ReadAllBytes($f) } else { , [byte[]]@() } }
 function StubIn([string]$Name) { $f = Join-Path $stubDir "$Name.stdin.log"; if (Test-Path $f) { Get-Content -LiteralPath $f -Raw } else { '' } }
 $goodSummary = @'
 Replication Summary Start Time: 2026-11-22 10:00:00
@@ -338,11 +342,11 @@ Check 'DSRM Variante B: das Kennwort kommt zweimal ueber die Standardeingabe an 
 Check 'GEGENTEST: das Kennwort steht NICHT in der Kommandozeile (Argumente des Stubs)' ($argLog -notmatch [regex]::Escape($testPw) -and $argLog -notmatch 'Gegen')
 Check 'GEGENTEST: Rueckgabe, Protokoll und Fehlerliste enthalten das Kennwort nicht' ((($r1 | Out-String) -notmatch [regex]::Escape($testPw)) -and ((AuditText) -notmatch [regex]::Escape($testPw)) -and (($Error | Out-String) -notmatch [regex]::Escape($testPw)))
 $hits = New-Object System.Collections.Generic.List[string]
-$scanRoots = @($work) + @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'ServerMigration-*' -or $_.Name -like 'sm-*' -or $_.LastWriteTime -ge $startTime.AddSeconds(-5) } | ForEach-Object FullName)
+$scanRoots = @($work) + @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike 'sm-ad-test-*' -and ($_.Name -like 'ServerMigration-*' -or $_.Name -like 'sm-*' -or $_.LastWriteTime -ge $startTime.AddSeconds(-5)) } | ForEach-Object FullName)   # ohne Ordner paralleler Testlaeufe
 $scanFiles = @(Get-ChildItem -LiteralPath $env:TEMP -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $startTime.AddSeconds(-5) -and $_.Length -lt 4MB })
 foreach ($root in $scanRoots) { $scanFiles += @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 4MB }) }
 foreach ($f in $scanFiles) {
-    if (($f.Directory.Name -eq 'stubs' -and $f.Name -in 'ntdsutil.stdin.log', 'ntdsutil.out') -or $f.Extension -in '.exe', '.dll') { continue }   # Mitschrift und Attrappe des Stubs selbst
+    if (($f.Directory.Name -eq 'stubs' -and $f.Name -in 'ntdsutil.stdin.log', 'ntdsutil.out') -or $f.Extension -in '.exe', '.dll' -or $f.Name -eq 'ntdsutil.stdin.bin') { continue }   # Mitschrift und Attrappe des Stubs selbst
     try { if ([IO.File]::ReadAllText($f.FullName) -match [regex]::Escape($testPw)) { $hits.Add($f.FullName) } } catch { }
 }
 Check ('GEGENTEST: keine Datei im Testordner und im Temp-Ordner enthaelt das Kennwort (ausser der Mitschrift des Stubs selbst) ' + $(if ($hits.Count) { $hits -join ', ' })) ($hits.Count -eq 0)
@@ -580,6 +584,45 @@ foreach ($mode in 'Light', 'Dark') {
         Check ("$($entry[0]) -ParseOnly ($mode) mit Seite Active Directory: $($o.Trim())") ($o.Trim() -eq 'PARSE OK')
     }
 }
+# ---------------------------------------------------------------- 12. Standardeingabe ohne BOM (Fehler: [Console]::InputEncoding mit UTF-8-BOM landete vor dem Text)
+function HasBom([byte[]]$B) { $B.Length -ge 3 -and $B[0] -eq 0xEF -and $B[1] -eq 0xBB -and $B[2] -eq 0xBF }
+function HexOf([byte[]]$B) { ($B | ForEach-Object { '{0:X2}' -f $_ }) -join ' ' }
+$oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+$umPw = 'Gegen-Test-K' + [char]0xE4 + 'se-7531!'
+$umSec = ConvertTo-SecureString $umPw -AsPlainText -Force; $umSec2 = ConvertTo-SecureString $umPw -AsPlainText -Force
+$expUm = $oem.GetBytes($umPw + "`r`n" + $umPw + "`r`n")
+$origInEnc = $null; try { $origInEnc = [Console]::InputEncoding } catch { }
+foreach ($mode in 'UTF8-BOM', 'Standard') {
+    $applied = $true
+    if ($mode -eq 'UTF8-BOM') { try { [Console]::InputEncoding = New-Object Text.UTF8Encoding($true) } catch { $applied = $false; Write-Host 'INFO Konsolen-Eingabekodierung nicht setzbar (keine Konsole)' -ForegroundColor Yellow } }
+    try {
+        if ($mode -eq 'UTF8-BOM' -and $applied) {
+            Check 'BOM-Test: Vorbedingung, die Konsolen-Eingabekodierung hat wirklich eine Praeambel' (([Console]::InputEncoding.GetPreamble()).Length -eq 3)
+        }
+        ResetState; ResetStubLogs; GoodRepl
+        SetStub 'ntdsutil' "Password has been set successfully.`r`n"
+        $null = Invoke-SmAdDsrmSync -Account 'svc-dsrm' -Confirmed
+        $bs = StubBytes 'ntdsutil'
+        Check "BOM-Test [$mode]: ntdsutil Variante A (Sync) bekommt keine Bytes, kein BOM" ($bs.Length -eq 0)
+        ResetStubLogs
+        $null = Invoke-SmAdDsrmReset -Password $umSec -Confirm $umSec2 -Confirmed
+        $bs = StubBytes 'ntdsutil'
+        Check "BOM-Test [$mode]: ntdsutil Variante B (Kennwort) beginnt ohne BOM" (-not (HasBom $bs))
+        Check "BOM-Test [$mode]: Kennwort mit Umlaut kommt zweimal als genau die OEM-Bytes (CP $($oem.CodePage)) an: $(HexOf $bs)" ((HexOf $bs) -eq (HexOf $expUm))
+        $script:S.Schema = $localFqdn; $script:S.Infra = $localFqdn
+        GoodRepl; $script:S.SchemaQueue = @(88, 91); ResetStubLogs
+        SetStub 'adprep' "Adprep successfully updated the forest-wide information.`r`n"
+        $null = Invoke-SmAdAdprep -MediaPath $media -Phase Forest -Confirmed
+        $bs = StubBytes 'adprep'
+        Check "BOM-Test [$mode]: adprep bekommt genau 'C' + Zeilenende, kein BOM: $(HexOf $bs)" ((HexOf $bs) -eq (HexOf $oem.GetBytes("C`r`n")))
+    }
+    finally { if ($mode -eq 'UTF8-BOM' -and $applied -and $origInEnc) { try { [Console]::InputEncoding = $origInEnc } catch { } } }
+}
+$bomSrc = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\server\SmAdServer.ps1') -Raw)
+Check 'BOM-Test: Invoke-SmAdProcess schreibt nicht ueber StandardInput.Write/WriteLine (nur BaseStream)' ($bomSrc -notmatch '(?m)^[^#
+]*StandardInput\.Write')
+$script:SmAdCdRomRoots = @($media)
+ClearStub 'ntdsutil'; ClearStub 'adprep'; ResetStubLogs
 $pkgNames = $script:SmServerFiles
 if (Get-Command New-SmServerPackage -ErrorAction SilentlyContinue) { }
 $script:SmAdCdRomRoots = $null

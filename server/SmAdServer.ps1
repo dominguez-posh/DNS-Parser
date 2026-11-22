@@ -116,23 +116,44 @@ function Invoke-SmAdProcess {
     $enc = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
     $psi.StandardOutputEncoding = $enc; $psi.StandardErrorEncoding = $enc
     $p = New-Object Diagnostics.Process; $p.StartInfo = $psi
-    [void]$p.Start()   # diesen Prozess haben wir selbst gestartet; nur ihn beenden wir bei Zeitueberschreitung
+    # Process.Start legt den Schreiber fuer die Standardeingabe mit [Console]::InputEncoding an und schreibt dessen Praeambel sofort
+    # (AutoFlush) in die Pipe: bei einer UTF-8-Konsole ein BOM (EF BB BF) noch vor jeder Eingabe. .NET Framework hat dafuer kein
+    # StandardInputEncoding. Deshalb waehrend Start dieselbe Codepage ohne Praeambel (nur 65001, 1200, 1201, 12000, 12001), danach wieder die
+    # urspruengliche Kodierung. Es bleibt dieselbe Codepage, SetConsoleCP aendert also nichts; ohne Praeambel (Standard, OEM) geschieht nichts.
+    $inEncSaved = $null; $inEncSwapped = $false
+    try {
+        $cur = [Console]::InputEncoding
+        if ($cur.GetPreamble().Length -gt 0) {
+            $plain = switch ($cur.CodePage) { 65001 { New-Object Text.UTF8Encoding($false) } 1200 { New-Object Text.UnicodeEncoding($false, $false) } 1201 { New-Object Text.UnicodeEncoding($true, $false) } 12000 { New-Object Text.UTF32Encoding($false, $false) } 12001 { New-Object Text.UTF32Encoding($true, $false) } default { $null } }
+            if ($plain) { $inEncSaved = $cur; [Console]::InputEncoding = $plain; $inEncSwapped = $true }
+        }
+    } catch { }   # keine Konsole angebunden: es gibt auch keine Konsolenkodierung, die ein BOM liefert
+    try { [void]$p.Start() }   # diesen Prozess haben wir selbst gestartet; nur ihn beenden wir bei Zeitueberschreitung
+    finally { if ($inEncSwapped) { try { [Console]::InputEncoding = $inEncSaved } catch { } } }
     $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
     try {
-        foreach ($l in $StdIn) { $p.StandardInput.WriteLine($l) }
+        # Eingabe als Bytes direkt auf den Stream, ohne Praeambel (GetBytes liefert nie eine): Der Schreiber der Standardeingabe kodiert mit
+        # [Console]::InputEncoding des aufrufenden Prozesses, also je nach Konsole in UTF-8. ntdsutil und adprep sind Konsolenprogramme und
+        # lesen in der OEM-Codepage (wie ihre Ausgabe oben), daher diese Kodierung.
+        $in = $p.StandardInput.BaseStream
+        $crlf = $enc.GetBytes("`r`n")
+        foreach ($l in $StdIn) { $b = $enc.GetBytes([string]$l); $in.Write($b, 0, $b.Length); $in.Write($crlf, 0, $crlf.Length) }
         if ($Secret) {
-            $bstr = [IntPtr]::Zero; $chars = $null
+            $bstr = [IntPtr]::Zero; $chars = $null; $bytes = $null
             try {
                 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
                 $chars = [char[]]::new($Secret.Length)
                 [Runtime.InteropServices.Marshal]::Copy($bstr, $chars, 0, $chars.Length)
-                for ($i = 0; $i -lt $SecretRepeat; $i++) { $p.StandardInput.Write($chars, 0, $chars.Length); $p.StandardInput.WriteLine() }
+                $bytes = $enc.GetBytes($chars)   # Bytes aus dem Zeichenfeld, kein String
+                for ($i = 0; $i -lt $SecretRepeat; $i++) { $in.Write($bytes, 0, $bytes.Length); $in.Write($crlf, 0, $crlf.Length) }
             }
             finally {
+                if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
                 if ($chars) { [Array]::Clear($chars, 0, $chars.Length) }
                 if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
             }
         }
+        $in.Flush()
         try { $p.StandardInput.Close() } catch { }
         if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; throw ('Zeitueberschreitung bei ' + (Split-Path -Leaf $FilePath)) }
         $p.WaitForExit()
