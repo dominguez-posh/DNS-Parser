@@ -304,6 +304,10 @@ $ErrorActionPreference = 'Stop'
 foreach ($l in (Get-Content -LiteralPath $dnsOut)) { if ($l -match '^(OK|FAIL|INFO) ') { Write-Host $l } }
 Check "Test-Dns.ps1: Exitcode $dnsCode (0 = keine Fehler)" ($dnsCode -eq 0)
 
+# ---------------------------------------------------------------- 6. Phase 4: DHCP (eigene Datei)
+Write-Host ''
+Write-Host '--- DHCP (tests\Test-Dhcp.ps1)'
+$script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Dhcp.ps1') -Repo $repo -Work $work)[-1])
 Write-Host ''
 Write-Host "$script:fails Fehler"
 exit $script:fails

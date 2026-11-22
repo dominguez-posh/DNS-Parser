@@ -1,0 +1,57 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Margin="40,28,40,20">
+    <!-- Seite DHCP im Berater-Tool (Phase 4): Vorher-/Nachher-Vergleich. Logik: Modules\SmDhcp.ps1 -->
+    <Grid.Resources>
+        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="Transparent"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}" Color="Transparent"/>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{DynamicResource Surface}"/><Setter Property="Foreground" Value="{DynamicResource Text}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="8,6"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}"/><Setter Property="BorderThickness" Value="0,0,1,1"/>
+        </Style>
+        <Style TargetType="DataGridCell">
+            <Setter Property="Foreground" Value="{DynamicResource Text}"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="DataGridCell">
+                        <Border x:Name="Bd" Background="Transparent" Padding="{TemplateBinding Padding}"><ContentPresenter VerticalAlignment="Center"/></Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True"><Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSubtle}"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Grid.Resources>
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+
+    <StackPanel Grid.Row="0">
+        <TextBlock Text="DHCP-Vergleich" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Vergleicht den Export vom alten Server (vorher) mit dem Stand des neuen Servers nach dem Import (nachher), je Bereich, Option, Reservierung, Ausschluss, Lease-Anzahl und Failover."/>
+    </StackPanel>
+
+    <Border Grid.Row="1" Style="{DynamicResource CardBox}" Margin="0,14,0,0" Background="{DynamicResource Card}" Padding="16,12">
+        <StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnDhcpFind" Content="Dateien im Tauschordner suchen" Tag="&#xE721;" Margin="0,0,10,0"/>
+                <Button x:Name="BtnDhcpCompare" Content="Vergleichen" Style="{DynamicResource PrimaryButton}" IsEnabled="False" Margin="0,0,10,0"/>
+                <Button x:Name="BtnDhcpExport" Content="Unterschiede exportieren" Tag="&#xE78C;" IsEnabled="False" ToolTip="CSV oder Excel (benötigt Modules\SmExport.ps1)"/>
+            </StackPanel>
+            <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Vorher (Export vom alten Server)" Style="{DynamicResource SmallLabel}" VerticalAlignment="Center" Margin="0,0,12,6"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" x:Name="CmbDhcpBefore" Margin="0,0,0,6" AutomationProperties.Name="Vorher"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Nachher (Stand des neuen Servers)" Style="{DynamicResource SmallLabel}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <ComboBox Grid.Row="1" Grid.Column="1" x:Name="CmbDhcpAfter" AutomationProperties.Name="Nachher"/>
+            </Grid>
+            <CheckBox x:Name="ChkDhcpEqual" Margin="0,10,0,0"><TextBlock Text="Auch gleiche Einträge zeigen" Foreground="{DynamicResource Text}"/></CheckBox>
+            <TextBlock x:Name="TxtDhcpState" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="TxtDhcpCount" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+    </Border>
+
+    <DataGrid Grid.Row="2" x:Name="GrdDhcp" Margin="0,12,0,0" IsReadOnly="True" AutoGenerateColumns="True" CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+              Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
+              HorizontalGridLinesBrush="{DynamicResource Divider}" RowBackground="Transparent" FontSize="12" SelectionUnit="FullRow" MinHeight="120"
+              EnableRowVirtualization="True" AutomationProperties.Name="Unterschiede"/>
+</Grid>
