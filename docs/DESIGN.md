@@ -27,3 +27,9 @@ Technik: Keine Eigenschaften von Basisklassen (TextBoxBase, ButtonBase) in Style
 
 ## Protokoll
 - Immer die einklappbare Karte aus `Get-SmLogCardXaml`, gefüllt über `Add-SmLogLine`. Zeit in Mono und gedimmt, Meldung normal, Symbol und Farbe nur bei Erfolg (Haken), Hinweis (Warnung), Fehler. Werte ab 40 Hexzeichen und lange Links werden gekürzt (voller Text im Tooltip). "Kopieren" holt das ganze Protokoll.
+
+## Symbole und Schriften (Windows Server 2016 muss gleich aussehen)
+- Symbole nur aus `IconFont` (Ressource im Theme: Segoe Fluent Icons, Fallback Segoe MDL2 Assets). Nur Codepunkte, die es in beiden Schriften mit gleicher Bedeutung gibt; Liste in `tests/Test-Symbole.ps1`. Sonst Vektorpfad (Path-Geometrie) als Theme-Ressource.
+- Keine Emojis und keine Zeichen außerhalb der BMP (Surrogatpaare) in Oberflächentexten. Haken, Pfeile und Warnzeichen kommen aus `IconFont`, nie als Unicode-Text.
+- Der `Tag` eines Knopfs ist sein Symbol (das Theme zeigt ihn mit `IconFont`). Nie andere Daten (Phase, Id) in den Tag eines Knopfs legen: sonst erscheinen Kästchen. Dafür Name oder eine eigene Zuordnung nutzen.
+- Schriften immer mit Fallback: `Segoe UI Variable Text, Segoe UI`, `Cascadia Mono, Consolas` (`MonoFont`), `IconFont`. Server 2016 hat Variable, Cascadia und Fluent nicht.

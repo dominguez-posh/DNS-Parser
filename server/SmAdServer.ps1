@@ -1169,11 +1169,11 @@ function Register-SmAdServerPage {
             $u.TxtAdMedia.Text = $drives[($ix + 1) % $drives.Count]
             $u.TxtAdSchemaOut.Text = 'Laufwerke mit adprep: ' + ($drives -join ', ') + '. Nur ein originales Microsoft-ISO verwenden.'
         })
-    $Ui.BtnAdForestCheck.Tag = 'Forest'; $Ui.BtnAdForestPrep.Tag = 'Forest'; $Ui.BtnAdDomainCheck.Tag = 'Domain'; $Ui.BtnAdDomainPrep.Tag = 'Domain'
+    # Die Phase steht im Knopfnamen, nicht im Tag: das Theme zeigt den Tag als Symbol (Symbolschrift) und stellt "Forest" als Kästchen dar.
     foreach ($b in $Ui.BtnAdForestCheck, $Ui.BtnAdDomainCheck) {
         $b.Add_Click({
                 param($sender, $e)
-                $u = $script:SmAdUi.Ui; $phase = [string]$sender.Tag; $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
+                $u = $script:SmAdUi.Ui; $phase = $(if ($sender.Name -match 'Forest') { 'Forest' } else { 'Domain' }); $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
                 & $script:SmAdUi.Run "adprep $cmd prüfen" { param($State, $P) $x = Test-SmAdAdprepPrecheck -MediaPath $P.Media -Phase $P.Phase -VerifyCopy; [pscustomobject]@{ Ok = $x.Ok; Text = ((Format-SmAdChecks $x.Checks) + $(if ($x.Copy) { "`r`n`r`n" + (Format-SmAdAdprepFiles $x.Copy) } else { '' })); Schema = $(try { Get-SmAdSchemaVersion } catch { 0 }) } } @{ Media = $u.TxtAdMedia.Text.Trim(); Phase = $phase } $u.TxtAdSchemaOut {
                     param($x) $script:SmAdUi.Ui.TxtAdSchemaOut.Text = ($(if ($x.Ok) { "Vorprüfung bestanden.`r`n`r`n" } else { "Vorprüfung NICHT bestanden. Es wird nichts ausgeführt.`r`n`r`n" }) + $x.Text + "`r`n`r`nSchema-Version jetzt: $($x.Schema) ($(Get-SmAdSchemaName $x.Schema))")
                 }
@@ -1182,7 +1182,7 @@ function Register-SmAdServerPage {
     foreach ($b in $Ui.BtnAdForestPrep, $Ui.BtnAdDomainPrep) {
         $b.Add_Click({
                 param($sender, $e)
-                $u = $script:SmAdUi.Ui; $media = $u.TxtAdMedia.Text.Trim(); $phase = [string]$sender.Tag; $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
+                $u = $script:SmAdUi.Ui; $media = $u.TxtAdMedia.Text.Trim(); $phase = $(if ($sender.Name -match 'Forest') { 'Forest' } else { 'Domain' }); $cmd = if ($phase -eq 'Forest') { '/forestprep' } else { '/domainprep' }
                 if (-not (& $script:SmAdUi.Confirm "adprep $cmd" ("Medium $media, Gesamtstruktur bzw. Domäne dieses Servers") "adprep $cmd erweitert das Schema bzw. die Domäne. Die Änderung wird repliziert und lässt sich nur durch eine Gesamtstruktur-Wiederherstellung zurücknehmen. Eine aktuelle Systemstatus-Sicherung wird dringend empfohlen. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch. Das Tool startet adprep nur aus einer geprüften Kopie des Mediums. Nicht signierbare Dateien (.ldf) kann es nicht prüfen: Nur ein originales Microsoft-ISO verwenden.")) { & $script:SmAdUi.Log 'AD: adprep abgebrochen.'; return }
                 & $script:SmAdUi.Run "adprep $cmd" { param($State, $P) Invoke-SmAdAdprep -MediaPath $P.Media -Phase $P.Phase -Confirmed } @{ Media = $media; Phase = $phase } $u.TxtAdSchemaOut {
                     param($x) $cc = $script:SmAdUi; $cc.Ui.TxtAdSchemaOut.Text = ($x.Detail + "`r`n`r`n" + (($x.Lines | Select-Object -Last 40) -join "`r`n") + "`r`n`r`n" + (Format-SmAdAdprepFiles ([pscustomobject]@{ Files = $x.Files }))); & $cc.Log ('AD: adprep ' + $x.Detail)

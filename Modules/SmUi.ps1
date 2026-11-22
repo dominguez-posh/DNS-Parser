@@ -155,7 +155,7 @@ function Show-SmCopied {
     if (-not $script:SmCopyOrig.ContainsKey($key)) { $script:SmCopyOrig[$key] = @{ Content = $Button.Content; Tag = $Button.Tag; Timer = $null } }
     $store = $script:SmCopyOrig
     $orig = $store[$key]
-    $Button.Content = if ($Button.Content -is [string] -and $Button.Content -match '^[-]$') { [string][char]0xE73E } else { $Text }
+    $Button.Content = if ($Button.Content -is [string] -and $Button.Content.Length -eq 1 -and [int][char]$Button.Content -ge 57344 -and [int][char]$Button.Content -le 63743) { [string][char]0xE73E } else { $Text }
     if ($Button.Tag) { $Button.Tag = [string][char]0xE73E }
     if ($orig.Timer) { $orig.Timer.Stop() }
     $t = New-Object System.Windows.Threading.DispatcherTimer

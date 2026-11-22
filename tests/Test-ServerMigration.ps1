@@ -348,5 +348,8 @@ Write-Host ''
 Write-Host '--- Print (tests\Test-Print.ps1)'
 $script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Print.ps1') -Repo $repo -Work $work)[-1])
 Write-Host ''
+Write-Host '--- Symbole und Schriften (tests\Test-Symbole.ps1)'
+$script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Symbole.ps1') -Repo $repo -Work $work)[-1])
+Write-Host ''
 Write-Host "$script:fails Fehler"
 exit $script:fails
