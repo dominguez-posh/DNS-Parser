@@ -29,7 +29,10 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $root 'server\SmDhcpServer.ps1')
 . (Join-Path $root 'Modules\SmPrint.ps1')
 . (Join-Path $root 'server\SmPrintServer.ps1')
+. (Join-Path $root 'Modules\SmAd.ps1')
+. (Join-Path $root 'server\SmAdServer.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'))
+$adJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmAd.ps1'), (Join-Path $root 'server\SmAdServer.ps1'))
 $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'))
 $dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'), (Join-Path $root 'server\SmDhcpServer.ps1'))
 $printModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'server\SmDnsServer.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'), (Join-Path $root 'server\SmPrintServer.ps1'))
@@ -70,7 +73,7 @@ $pages = @(
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\DnsServer.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\DhcpServer.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Xaml = (Get-SmPrintServerPageXaml -Root $root) }
-    @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Phase = 6; Text = 'FSMO-Rollen, DSRM-Kennwort, Funktionsebenen und Schema mit Vorprüfungen.' }
+    @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Xaml = (Get-SmAdServerPageXaml -Root $root) }
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Server-Fenster' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
@@ -80,6 +83,7 @@ Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'Tx
 Test-SmWindowNames @('BtnDhcpCheck', 'TxtDhcpCheck', 'BtnDhcpExport', 'TxtDhcpExport', 'PrgDhcpExport', 'TxtDhcpExportSha', 'ChkDhcpNoLeases', 'BtnDhcpCopySha', 'ChkDhcpAfterNoLeases', 'TxtDhcpShaIn', 'TxtDhcpShaState', 'BtnDhcpFind', 'BtnDhcpDownload', 'LstDhcpExports', 'TxtDhcpDlSha', 'BtnDhcpOpen',
     'BoxDhcpImport', 'TxtDhcpInfo', 'RdoDhcpAll', 'RdoDhcpSel', 'LstDhcpScopes', 'ChkDhcpLeases', 'BtnDhcpImport', 'TxtDhcpImport', 'BtnDhcpAuth', 'TxtDhcpAuth', 'BtnDhcpAfter', 'TxtDhcpAfter', 'BtnDhcpOldList', 'LstDhcpOldScopes', 'BtnDhcpDeactivate')
 Test-SmWindowNames (Get-SmPrintServerUiNames)
+Test-SmWindowNames (Get-SmAdServerUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
 
 $script:Share = $null
@@ -146,6 +150,7 @@ $ui.BtnUpload.Add_Click({
 
 Initialize-SmPrintServerPage -Ui $ui -JobModules $printModules -AddLog ${function:Add-Log} -GetShare { $script:Share }
 if (-not $ShareLink) { Add-Log 'Kein Tauschordner angegeben (nur lokal).' }
+Register-SmAdServerPage -Ui $ui -JobModules $adJobModules -AddLog { param($m) Add-Log $m } -GetShare { $script:Share }
 Register-SmDnsServerPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Register-SmDhcpServerPage -Ui $ui -JobModules $dhcpJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Select-SmPage 'Start'

@@ -1,0 +1,22 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
+    <!-- Seite "Active Directory" im Berater-Tool (Phase 6). Logik: Modules\SmAd.ps1. Nur lesend. -->
+    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
+        <TextBlock Text="Active Directory" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Zeigt die Berichte, die das Server-Fenster auf dem neuen DC erstellt und in den Tauschordner gelegt hat: Funktionsebenen, Schema-Version, Domänencontroller, FSMO-Rollen, Replikation und dcdiag. Die Berichte werden nur als Daten gelesen (Größenlimit), es wird nichts daraus ausgeführt."/>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="Berichte im Tauschordner" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Zuerst auf der Seite Tauschordner verbinden."/>
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="BtnAdrList" Content="Berichte suchen" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="CmbAdrFiles" MinWidth="360" Margin="0,0,8,0" AutomationProperties.Name="Bericht im Tauschordner"/>
+                    <Button x:Name="BtnAdrShow" Content="Anzeigen"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtAdrState" Foreground="{DynamicResource MutedText}" Margin="0,10,0,0"/>
+                <TextBox x:Name="TxtAdrReport" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="200" MaxHeight="480" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+                <Button x:Name="BtnAdrExport" Content="DC-Tabelle exportieren (CSV/Excel) …" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</ScrollViewer>

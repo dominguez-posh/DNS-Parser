@@ -1,0 +1,116 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
+    <!-- Seite "Active Directory" im Server-Fenster (Phase 6). Logik: server\SmAdServer.ps1 -->
+    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
+        <TextBlock Text="Active Directory" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Läuft auf dem neuen Domänencontroller. Jede Änderung hat eine Vorprüfung, eine Bestätigung und eine Protokollzeile ohne Geheimnisse. Alles hier ändert die Gesamtstruktur des Kunden."/>
+
+        <Border x:Name="BoxAdAdmin" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="16,10" Visibility="Collapsed">
+            <TextBlock Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Text="Dieses Fenster läuft nicht als Administrator. Die ändernden Aktionen sind gesperrt. Bitte PowerShell mit 'Als Administrator ausführen' öffnen und den Einzeiler erneut einfügen."/>
+        </Border>
+        <Border x:Name="BoxAdModule" Style="{DynamicResource CardBox}" Margin="0,12,0,0" Background="{DynamicResource WarningBg}" Padding="16,10" Visibility="Collapsed">
+            <TextBlock Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Text="Das PowerShell-Modul ActiveDirectory fehlt. Es ist auf Domänencontrollern dabei, sonst: Install-WindowsFeature RSAT-AD-PowerShell. Ohne das Modul sind die AD-Aktionen nicht möglich."/>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="1  Übersicht (nur lesend)" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Funktionsebenen, Schema-Version, alle DCs mit Betriebssystem, Standort, GC und RODC, FSMO-Inhaber, Replikation (repadmin) und dcdiag. Der JSON-Bericht enthält keine Geheimnisse und lässt sich in den Tauschordner hochladen."/>
+                <CheckBox x:Name="ChkAdDns" Content="DNS-Registrierung der DCs mitprüfen (dauert länger)"/>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="BtnAdOverview" Content="Übersicht erstellen" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnAdUpload" Content="Bericht hochladen" IsEnabled="False" Margin="0,0,12,0"/>
+                    <TextBlock x:Name="TxtAdOverviewState" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
+                </StackPanel>
+                <TextBox x:Name="TxtAdOverview" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MaxHeight="320" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="2  FSMO-Rollen auf diesen Server übertragen" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Die Übertragung läuft vom heutigen Inhaber auf diesen Server. Vorher werden Replikation, dcdiag, Erreichbarkeit des Inhabers und die Rechte geprüft; bei Fehlern wird nicht übertragen. Rollen und Inhaber werden vorher und nachher angezeigt."/>
+                <WrapPanel>
+                    <CheckBox x:Name="ChkAdPdc" Content="PDC-Emulator" Margin="0,0,16,4"/>
+                    <CheckBox x:Name="ChkAdRid" Content="RID-Master" Margin="0,0,16,4"/>
+                    <CheckBox x:Name="ChkAdInfra" Content="Infrastrukturmaster" Margin="0,0,16,4"/>
+                    <CheckBox x:Name="ChkAdSchema" Content="Schemamaster" Margin="0,0,16,4"/>
+                    <CheckBox x:Name="ChkAdNaming" Content="Domänennamenmaster" Margin="0,0,16,4"/>
+                </WrapPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button x:Name="BtnAdFsmoAll" Content="Alle wählen" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnAdFsmoCheck" Content="Vorprüfung" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnAdFsmoMove" Content="Übertragen …" Style="{DynamicResource PrimaryButton}"/>
+                </StackPanel>
+                <TextBox x:Name="TxtAdFsmoOut" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MaxHeight="260" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+
+                <Border Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" CornerRadius="6" Padding="14,10">
+                    <StackPanel>
+                        <TextBlock Text="Rolle übernehmen (Seize), nur wenn der Inhaber nicht mehr zurückkommt" Foreground="{DynamicResource DangerText}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock Foreground="{DynamicResource DangerText}" TextWrapping="Wrap" Margin="0,6,0,0" Text="ACHTUNG: Der alte Domänencontroller darf danach NIE wieder ans Netz. Sonst entstehen zwei Rolleninhaber mit Datenverlust. Der Schritt ist nur erlaubt, wenn der Inhaber nachweislich nicht erreichbar ist."/>
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <ComboBox x:Name="CmbAdSeizeRole" MinWidth="200" Margin="0,0,8,0" AutomationProperties.Name="Rolle für Seize"/>
+                            <Button x:Name="BtnAdSeizeCheck" Content="Inhaber prüfen"/>
+                        </StackPanel>
+                        <TextBlock Text="Zur Bestätigung den Rollennamen genau so tippen" Style="{DynamicResource SmallLabel}" Margin="0,8,0,2"/>
+                        <TextBox x:Name="TxtAdSeizeConfirm" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" AutomationProperties.Name="Rollenname zur Bestätigung"/>
+                        <Button x:Name="BtnAdSeize" Content="Rolle übernehmen (Seize) …" Style="{DynamicResource DangerGhost}" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="3  DSRM-Kennwort" Style="{DynamicResource CardTitle}"/>
+                <RadioButton x:Name="RbAdDsrmSync" Content="Mit Domänenkonto synchronisieren (empfohlen, das Tool berührt kein Kennwort)" GroupName="Dsrm" Margin="0,8,0,0"/>
+                <TextBlock Text="Domänenkonto (nur dieser Server, einmalig)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
+                <TextBox x:Name="TxtAdDsrmAccount" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänenkonto für die Synchronisierung"/>
+                <RadioButton x:Name="RbAdDsrmPwd" Content="Neues Kennwort setzen" GroupName="Dsrm" Margin="0,14,0,0"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="22,4,0,4" TextWrapping="Wrap" Text="Das Kennwort geht nur über die Standardeingabe an ntdsutil und wird nirgends gespeichert, protokolliert oder hochgeladen. Mindestens 12 Zeichen, drei von vier Zeichenarten."/>
+                <TextBlock Text="Domänencontroller (leer = dieser Server)" Style="{DynamicResource SmallLabel}" Margin="22,6,0,2"/>
+                <TextBox x:Name="TxtAdDsrmDc" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" AutomationProperties.Name="Domänencontroller für das DSRM-Kennwort"/>
+                <TextBlock Text="Neues Kennwort" Style="{DynamicResource SmallLabel}" Margin="22,8,0,2"/>
+                <PasswordBox x:Name="PwdAdDsrm1" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="Neues DSRM-Kennwort"/>
+                <TextBlock Text="Noch einmal" Style="{DynamicResource SmallLabel}" Margin="22,8,0,2"/>
+                <PasswordBox x:Name="PwdAdDsrm2" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" Margin="22,0,0,0" Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Border}" AutomationProperties.Name="DSRM-Kennwort wiederholen"/>
+                <Button x:Name="BtnAdDsrm" Content="DSRM-Kennwort ändern …" Style="{DynamicResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,14,0,0"/>
+                <TextBox x:Name="TxtAdDsrmOut" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="120" VerticalScrollBarVisibility="Auto" FontSize="12"/>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="4  Funktionsebene anheben" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Möglich, wenn alle DCs mindestens das Zielsystem haben und die Replikation in Ordnung ist. NICHT UMKEHRBAR. Vorher eine aktuelle Systemstatus-Sicherung anlegen. Zur Bestätigung wird der Name der Domäne bzw. Gesamtstruktur getippt."/>
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="CmbAdLevelScope" MinWidth="160" Margin="0,0,8,0" AutomationProperties.Name="Domäne oder Gesamtstruktur"/>
+                    <ComboBox x:Name="CmbAdLevelTarget" MinWidth="200" Margin="0,0,8,0" AutomationProperties.Name="Zielebene"/>
+                    <Button x:Name="BtnAdLevelCheck" Content="Ebenen lesen / Vorprüfung"/>
+                </StackPanel>
+                <TextBlock Text="Name der Domäne bzw. Gesamtstruktur tippen (z. B. contoso.local)" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
+                <TextBox x:Name="TxtAdLevelConfirm" Padding="8,6" MaxWidth="320" HorizontalAlignment="Left" AutomationProperties.Name="Name zur Bestätigung"/>
+                <Button x:Name="BtnAdLevelRaise" Content="Ebene anheben (nicht umkehrbar) …" Style="{DynamicResource DangerGhost}" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                <TextBox x:Name="TxtAdLevelOut" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="240" VerticalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,16" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="5  Schema-Update (adprep)" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Nur nötig, wenn das Schema vorab erweitert werden soll. Ab Windows Server 2012 macht das Heraufstufen eines DCs das automatisch. /forestprep läuft auf dem Schemamaster, /domainprep auf dem Infrastrukturmaster. Vorher eine Systemstatus-Sicherung anlegen."/>
+                <TextBlock Text="Installationsmedium (Ordner mit support\adprep\adprep.exe)" Style="{DynamicResource SmallLabel}"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBox x:Name="TxtAdMedia" Padding="8,6" Width="420" Margin="0,0,8,0" AutomationProperties.Name="Pfad zum Installationsmedium"/>
+                    <Button x:Name="BtnAdMediaBrowse" Content="Wählen …"/>
+                </StackPanel>
+                <WrapPanel Margin="0,10,0,0">
+                    <Button x:Name="BtnAdForestCheck" Content="/forestprep prüfen" Margin="0,0,8,4"/>
+                    <Button x:Name="BtnAdForestPrep" Content="/forestprep ausführen …" Style="{DynamicResource DangerGhost}" Margin="0,0,16,4"/>
+                    <Button x:Name="BtnAdDomainCheck" Content="/domainprep prüfen" Margin="0,0,8,4"/>
+                    <Button x:Name="BtnAdDomainPrep" Content="/domainprep ausführen …" Style="{DynamicResource DangerGhost}" Margin="0,0,8,4"/>
+                </WrapPanel>
+                <TextBox x:Name="TxtAdSchemaOut" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MaxHeight="280" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</ScrollViewer>

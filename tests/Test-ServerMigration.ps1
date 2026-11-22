@@ -308,6 +308,15 @@ Check "Test-Dns.ps1: Exitcode $dnsCode (0 = keine Fehler)" ($dnsCode -eq 0)
 Write-Host ''
 Write-Host '--- DHCP (tests\Test-Dhcp.ps1)'
 $script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Dhcp.ps1') -Repo $repo -Work $work)[-1])
+# ---------------------------------------------------------------- 6. Active Directory (Phase 6)
+$adOut = Join-Path $work 'test-ad.txt'
+$ErrorActionPreference = 'Continue'
+& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $repo 'tests\Test-Ad.ps1') *> $adOut
+$adCode = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+foreach ($l in (Get-Content -LiteralPath $adOut)) { if ($l -match '^(OK|FAIL|INFO) ') { Write-Host $l } }
+Check "Test-Ad.ps1: Exitcode $adCode (0 = keine Fehler)" ($adCode -eq 0)
+
 Write-Host ''
 Write-Host '--- Print (tests\Test-Print.ps1)'
 $script:fails += [int](@(& (Join-Path $PSScriptRoot 'Test-Print.ps1') -Repo $repo -Work $work)[-1])

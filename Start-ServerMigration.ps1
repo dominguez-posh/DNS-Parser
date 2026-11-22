@@ -30,7 +30,9 @@ $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmDnsUi.ps1')
 . (Join-Path $root 'Modules\SmDhcp.ps1')
 . (Join-Path $root 'Modules\SmPrint.ps1')
+. (Join-Path $root 'Modules\SmAd.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'), (Join-Path $root 'Modules\SmProjekte.ps1'))
+$adJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmAd.ps1'), (Join-Path $root 'Modules\SmExport.ps1'))
 $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmExport.ps1'), (Join-Path $root 'Modules\SmDns.ps1'))
 $dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'))
 $printJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'))
@@ -91,7 +93,7 @@ $pages = @(
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\Dns.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\Dhcp.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Xaml = (Get-SmPrintPageXaml -Root $root) }
-    @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Phase = 6; Text = 'FSMO-Rollen, DSRM-Kennwort, Funktionsebenen und Schema mit Vorprüfungen.' }
+    @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Xaml = (Get-SmAdPageXaml -Root $root) }
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Berater-Tool' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
@@ -100,7 +102,9 @@ Test-SmWindowNames @('TxtLink', 'BtnConnect', 'TxtShareState', 'TxtFiles', 'BtnP
     'NavStart', 'NavProjekte', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 Test-SmWindowNames @('BtnDhcpFind', 'BtnDhcpCompare', 'BtnDhcpExport', 'CmbDhcpBefore', 'CmbDhcpAfter', 'ChkDhcpEqual', 'TxtDhcpState', 'TxtDhcpCount', 'GrdDhcp')
 Test-SmWindowNames (Get-SmProjectUiNames)
+Test-SmWindowNames (Get-SmAdPageUiNames)
 $script:Share = $null
+Initialize-SmAdPage -Ui $ui -JobModules $adJobModules -AddLog { param($m) Add-Log $m } -GetShare { $script:Share }
 Register-SmDnsPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
 Test-SmWindowNames (Get-SmPrintPageUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
