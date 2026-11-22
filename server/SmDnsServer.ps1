@@ -9,7 +9,7 @@
     Windows PowerShell 5.1. Datei bleibt ASCII.
 #>
 
-$script:SmDnsDefaultPath = '%windir%\System32\dns\dns.log'
+$script:SmDnsDefaultPath = Join-Path ([Environment]::GetFolderPath('System')) 'dns\dns.log'   # aus der Windows-API: Umgebungsvariablen sind fuer Sicherheitsentscheidungen nicht verlaesslich
 $script:SmDnsDefaultMaxMB = 500
 # Pakete, die fuer die Auswertung gebraucht werden (Queries, Answers, Send, Receive, UDP, TCP) plus Notify und Update fuer die Ansicht "Updates und Notify".
 # Schluessel = Eigenschaft von Get-DnsServerDiagnostics, Wert = Parameter von Set-DnsServerDiagnostics (laut Microsoft-Doku heisst nur Update dort Updates).
@@ -28,6 +28,11 @@ function Test-SmAdmin {
     try { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $false }
 }
 
+function Get-SmSystemDir {
+    <# ...\System32 aus der Windows-API (GetFolderPath), nicht aus %windir% oder %SystemRoot%: Die Umgebung des Prozesses kann veraendert sein. #>
+    [Environment]::GetFolderPath('System')
+}
+
 function Get-SmDnsStateDir {
     Join-Path $env:ProgramData 'ServerMigration'
 }
@@ -35,7 +40,7 @@ function Get-SmDnsStateDir {
 function Get-SmDnsAllowedDir {
     <# Seit dem Cumulative Update 2026-11 fuer Windows Server 2025 ignoriert der DNS-Server Log-Pfade ausserhalb von %windir%\System32\dns (Event 506). #>
     if ($script:SmDnsAllowedDirOverride) { return $script:SmDnsAllowedDirOverride }   # nur fuer Tests
-    Join-Path $env:windir 'System32\dns'
+    Join-Path (Get-SmSystemDir) 'dns'
 }
 
 function Get-SmDnsStateSids {
@@ -82,6 +87,36 @@ function Protect-SmDnsStateDir {
     catch { throw "Die Zugriffsrechte des Sicherungsordners konnten nicht gesetzt werden: $($_.Exception.Message)" }
     $bad = @(Test-SmDnsStateDirAcl -Path $Path -AllowedSids $AllowedSids)
     if ($bad.Count) { throw ('Der Sicherungsordner ist nicht sicher, abgebrochen: ' + ($bad -join ' ')) }
+}
+
+function New-SmUniquePath {
+    <# Pfad fuer eine NEUE Ausgabedatei: der Name bekommt einen zufaelligen GUID-Anteil (vor der Endung), und es gibt noch keine Datei dieses Namens. Legt nichts an. #>
+    param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Name)
+    $ext = [IO.Path]::GetExtension($Name); $base = [IO.Path]::GetFileNameWithoutExtension($Name)
+    for ($i = 0; $i -lt 10; $i++) {
+        $p = Join-Path $Folder ('{0}-{1}{2}' -f $base, [guid]::NewGuid().ToString('N').Substring(0, 12), $ext)
+        if (-not (Test-Path -LiteralPath $p)) { return $p }
+    }
+    throw 'Kein freier Dateiname gefunden, abgebrochen.'
+}
+
+function Write-SmNewFile {
+    <# Schreibt eine Datei nur, wenn es sie noch nicht gibt (FileMode.CreateNew, exklusiv): Eine vorhandene Datei behielte Besitzer und Zugriffsliste eines Nicht-Administrators. Wirft, wenn sie existiert. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes)
+    $fs = New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $fs.Write($Bytes, 0, $Bytes.Length) } finally { $fs.Dispose() }
+}
+
+function Write-SmNewText {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    Write-SmNewFile -Path $Path -Bytes ((New-Object Text.UTF8Encoding $false).GetBytes($Text))
+}
+
+function Test-SmSecureFile {
+    <# Datei pruefen: normale Datei, keine Verknuepfung, Besitzer nur Administratoren oder SYSTEM, kein Allow-Eintrag fuer andere (geerbt aus dem gehaerteten Ordner ist in Ordnung). Liefert die Probleme (leer = in Ordnung). #>
+    param([Parameter(Mandatory)][string]$Path, [string[]]$AllowedSids = (Get-SmDnsStateSids))
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @('Die Datei fehlt.') }
+    @(Test-SmDnsStateDirAcl -Path $Path -AllowedSids $AllowedSids | ForEach-Object { $_ -replace 'des Ordners', 'der Datei' -replace 'Der Ordner', 'Die Datei' })
 }
 
 function Remove-SmWorkOrphans {

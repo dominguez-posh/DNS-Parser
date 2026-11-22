@@ -40,7 +40,7 @@ function Assert-SmAdModule {
 function Get-SmAdToolPath {
     param([Parameter(Mandatory)][ValidateSet('repadmin', 'dcdiag', 'ntdsutil')][string]$Name)
     if ($script:SmAdToolPaths[$Name]) { return $script:SmAdToolPaths[$Name] }
-    Join-Path $env:windir "System32\$Name.exe"
+    Join-Path (Get-SmSystemDir) "$Name.exe"
 }
 
 function Get-SmAdFolder {
@@ -278,9 +278,9 @@ function New-SmAdReport {
     <# Schreibt den Bericht (JSON, ohne Geheimnisse) in den gehaerteten AD-Ordner. Liefert den Pfad. #>
     param([Parameter(Mandatory)]$Overview)
     $name = 'AD-Bericht-{0}-{1:yyyyMMdd-HHmmss}.json' -f ($env:COMPUTERNAME -replace '[^\w.\-]', '_'), (Get-Date)
-    $path = Join-Path (Get-SmAdFolder) $name
+    $path = New-SmUniquePath -Folder (Get-SmAdFolder) -Name $name   # neue Datei (CreateNew), nie eine vorhandene ueberschreiben (Sicherheits-Checkliste 13)
     $copy = [ordered]@{}; foreach ($k in $Overview.Keys) { if ($k -ne 'DomainLevels') { $copy[$k] = $Overview[$k] } }
-    [IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $copy -Depth 8), (New-Object Text.UTF8Encoding $false))
+    Write-SmNewText -Path $path -Text (ConvertTo-Json -InputObject $copy -Depth 8)
     $path
 }
 
@@ -945,8 +945,8 @@ function Invoke-SmAdAdprep {
             [pscustomobject]@{ Process = $pr; Check = $ck }
         }
         $r = $run.Process
-        $logFile = Join-Path (Get-SmAdFolder) ('adprep-{0}-{1:yyyyMMdd-HHmmss}.log' -f $adprepPhase.ToLower(), (Get-Date))
-        [IO.File]::WriteAllText($logFile, ((@($r.Lines) + '' + (Format-SmAdAdprepFiles $run.Check)) -join "`r`n"), (New-Object Text.UTF8Encoding $false))
+        $logFile = New-SmUniquePath -Folder (Get-SmAdFolder) -Name ('adprep-{0}-{1:yyyyMMdd-HHmmss}.log' -f $adprepPhase.ToLower(), (Get-Date))
+        Write-SmNewText -Path $logFile -Text ((@($r.Lines) + '' + (Format-SmAdAdprepFiles $run.Check)) -join "`r`n")
         if ($r.ExitCode -ne 0) { throw ('adprep meldete einen Fehler (Exitcode {0}); Ausgabe in {1}' -f $r.ExitCode, $logFile) }
         $after = Get-SmAdSchemaVersion
         $note = ''

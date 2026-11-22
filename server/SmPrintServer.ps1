@@ -19,6 +19,7 @@ $script:SmPrintBrmTimeoutSec = 7200
 $script:SmPrintMaxExportBytes = 8GB
 $script:SmPrintExportPattern = '^[\w.\-]+\.printerExport$'
 $script:SmPrintWorkPattern = '^Import-[0-9a-f]{32}$'   # Arbeitsverzeichnis des Imports im gehaerteten Ordner
+$script:SmPrintExportWorkPattern = '^Export-[0-9a-f]{32}$'   # frischer Unterordner, in den PrintBrm beim Export schreibt
 $script:SmPrintStateFile = 'Druckprotokoll-Zustand.json'
 $script:SmPrintAuditFile = 'Protokoll.log'
 
@@ -26,12 +27,12 @@ $script:SmPrintAuditFile = 'Protokoll.log'
 
 function Get-SmPrintBrmPath {
     if ($script:SmPrintBrmPath) { return $script:SmPrintBrmPath }
-    Join-Path $env:windir 'System32\spool\tools\PrintBrm.exe'
+    Join-Path (Get-SmSystemDir) 'spool\tools\PrintBrm.exe'
 }
 
 function Get-SmWevtutilPath {
     if ($script:SmWevtutilPath) { return $script:SmWevtutilPath }
-    Join-Path $env:windir 'System32\wevtutil.exe'
+    Join-Path (Get-SmSystemDir) 'wevtutil.exe'
 }
 
 function Get-SmPrintFolder {
@@ -162,7 +163,7 @@ function Test-SmPrintPrecheck {
         if ($ok) {
             $len = (Get-Item -LiteralPath $ExportFile).Length
             $need = 2 * $len + 500MB
-            $free = Get-SmFreeBytes -Path $env:windir
+            $free = Get-SmFreeBytes -Path (Get-SmSystemDir)
             [void]$c.Add((New-SmCheck 'Platz' ($free -ge $need) ('Zu wenig freier Platz auf dem Systemlaufwerk: frei {0}, noetig etwa {1}.' -f (Format-SmSize $free), (Format-SmSize $need))))
         }
         $sp = Get-Service -Name Spooler -ErrorAction SilentlyContinue
@@ -206,9 +207,10 @@ function Get-SmPrintInventoryData {
 }
 
 function Write-SmPrintJson {
-    param([Parameter(Mandatory)]$Data, [Parameter(Mandatory)][string]$Path)
+    <# -New: Ausgabedatei, die es noch nicht geben darf (CreateNew, Sicherheits-Checkliste 13). Ohne -New wird ersetzt (nur der eigene Zustand). #>
+    param([Parameter(Mandatory)]$Data, [Parameter(Mandatory)][string]$Path, [switch]$New)
     $json = ConvertTo-Json -InputObject $Data -Depth 8
-    [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding $false))
+    if ($New) { Write-SmNewText -Path $Path -Text $json } else { [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding $false)) }
 }
 
 function Get-SmFileStamp { (Get-Date).ToString('yyyyMMdd-HHmmss') }
@@ -221,9 +223,11 @@ function New-SmPrintInventoryFile {
     $log = New-Object System.Collections.ArrayList
     $folder = Initialize-SmPrintFolder
     $name = 'Print-Inventur-{0}{1}-{2}.json' -f (Get-SmSafeComputer), $(if ($Stage -match '^[a-z]+$') { '-' + $Stage } else { '' }), (Get-SmFileStamp)
-    $path = Resolve-SmPrintFile -Folder $folder -Name $name
+    $path = New-SmUniquePath -Folder $folder -Name $name
+    $name = Split-Path -Leaf $path
+    [void](Resolve-SmPrintFile -Folder $folder -Name $name)
     $inv = Get-SmPrintInventoryData -Role $Role
-    Write-SmPrintJson -Data $inv -Path $path
+    Write-SmPrintJson -Data $inv -Path $path -New
     $sha = Get-SmPrintFileHash -Path $path
     Add-SmPrintAudit -Folder $folder -Log $log -Line ('Inventur erstellt: {0} ({1} Drucker, {2} Treiber, {3} Ports), SHA256 {4}' -f $name, @($inv.Printers).Count, @($inv.Drivers).Count, @($inv.Ports).Count, $sha)
     [pscustomobject]@{ Path = $path; Name = $name; Sha256 = $sha; Length = (Get-Item -LiteralPath $path).Length; Log = @($log) }
@@ -240,12 +244,27 @@ function Invoke-SmPrintExportCore {
     if (-not $pre.Ok) { throw ("Vorpruefung nicht bestanden:`r`n" + (Format-SmPrecheck $pre)) }
     $folder = Initialize-SmPrintFolder
     $name = 'Print-Export-{0}-{1}.printerExport' -f (Get-SmSafeComputer), (Get-SmFileStamp)
-    $path = Resolve-SmPrintFile -Folder $folder -Name $name -Pattern $script:SmPrintExportPattern
-    Add-SmPrintAudit -Folder $folder -Log $log -Line ('Export gestartet: PrintBrm -B -F {0}' -f $name)
-    $r = Invoke-SmNative -Path (Get-SmPrintBrmPath) -Arguments @('-B', '-F', $path) -TimeoutSec $script:SmPrintBrmTimeoutSec
-    if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {
-        throw ('PrintBrm meldet Exitcode {0}. Details im Ereignisprotokoll PrintBRM. {1}' -f $r.ExitCode, $r.Error)
+    [void](Resolve-SmPrintFile -Folder $folder -Name $name -Pattern $script:SmPrintExportPattern)
+    # PrintBrm schreibt selbst: in einen frischen, vorher nicht vorhandenen und gehaerteten Unterordner (eine vorhandene Datei behielte Besitzer und Zugriffsliste), dann ohne Ueberschreiben in den Sicherungsordner verschieben
+    $work = [IO.Path]::GetFullPath((Join-Path $folder ('Export-' + [guid]::NewGuid().ToString('N'))))
+    if (Test-Path -LiteralPath $work) { throw 'Das Arbeitsverzeichnis gibt es schon, abgebrochen.' }
+    Protect-SmDnsStateDir -Path $work
+    $tmpPath = Join-Path $work $name
+    $path = $null
+    try {
+        Add-SmPrintAudit -Folder $folder -Log $log -Line ('Export gestartet: PrintBrm -B -F {0}' -f $name)
+        $r = Invoke-SmNative -Path (Get-SmPrintBrmPath) -Arguments @('-B', '-F', $tmpPath) -TimeoutSec $script:SmPrintBrmTimeoutSec
+        if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tmpPath -PathType Leaf) -or (Get-Item -LiteralPath $tmpPath).Length -eq 0) {
+            throw ('PrintBrm meldet Exitcode {0}. Details im Ereignisprotokoll PrintBRM. {1}' -f $r.ExitCode, $r.Error)
+        }
+        $bad = @(Test-SmSecureFile -Path $tmpPath)
+        if ($bad.Count) { throw ('Die Exportdatei ist nicht sicher, abgebrochen: ' + ($bad -join ' ')) }
+        $path = New-SmUniquePath -Folder $folder -Name $name
+        [void](Resolve-SmPrintFile -Folder $folder -Name (Split-Path -Leaf $path) -Pattern $script:SmPrintExportPattern)
+        [IO.File]::Move($tmpPath, $path)   # wirft, wenn das Ziel existiert
+        $name = Split-Path -Leaf $path
     }
+    finally { Remove-SmPrintWork $work -Pattern $script:SmPrintExportWorkPattern }
     $sha = Get-SmPrintFileHash -Path $path
     Add-SmPrintAudit -Folder $folder -Log $log -Line ('Export fertig: {0} ({1}), SHA256 {2}' -f $name, (Format-SmSize (Get-Item -LiteralPath $path).Length), $sha)
     $inv = New-SmPrintInventoryFile -Role 'alt'
@@ -330,11 +349,11 @@ function Get-SmPrintStreamHash {
 
 function Remove-SmPrintWork {
     <# Loescht das Arbeitsverzeichnis <Sicherungsordner>\Import-<GUID>, aber nur, wenn der Pfad genau diese Form hat (GetFullPath-Pruefung) und keine Verknuepfung ist. #>
-    param([string]$Path)
+    param([string]$Path, [string]$Pattern = $script:SmPrintWorkPattern)
     if (-not $Path) { return }
     $full = [IO.Path]::GetFullPath($Path)
     $base = [IO.Path]::GetFullPath((Get-SmPrintFolder)).TrimEnd('\') + '\'
-    if ($full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -and ([IO.Path]::GetFileName($full) -match $script:SmPrintWorkPattern) -and (Test-Path -LiteralPath $full -PathType Container)) {
+    if ($full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -and ([IO.Path]::GetFileName($full) -match $Pattern) -and (Test-Path -LiteralPath $full -PathType Container)) {
         if ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
         Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -343,6 +362,7 @@ function Remove-SmPrintWork {
 function Clear-SmPrintOrphans {
     <# Start des Server-Fensters: verwaiste Import-<GUID>-Arbeitsordner im Sicherungsordner (aelter als 24 h, Besitzer Administratoren oder SYSTEM) loeschen. #>
     Remove-SmWorkOrphans -Root (Get-SmPrintFolder) -NamePattern $script:SmPrintWorkPattern
+    Remove-SmWorkOrphans -Root (Get-SmPrintFolder) -NamePattern $script:SmPrintExportWorkPattern
 }
 
 function Close-SmPrintPage {
@@ -645,8 +665,10 @@ function Invoke-SmPrintCollect {
     }
     $data = New-SmPrintAccessFile -Computer $env:COMPUTERNAME -Events $events -Snapshot $snap -RequestedFrom $since -Truncated $got.Truncated -Pseudonymized:$Pseudonymize -ClientsPseudonymized:$PseudonymizeClients
     $name = 'Print-Zugriffe-{0}-{1}.json' -f (Get-SmSafeComputer), (Get-SmFileStamp)
-    $path = Resolve-SmPrintFile -Folder $folder -Name $name
-    Write-SmPrintJson -Data $data -Path $path
+    $path = New-SmUniquePath -Folder $folder -Name $name
+    $name = Split-Path -Leaf $path
+    [void](Resolve-SmPrintFile -Folder $folder -Name $name)
+    Write-SmPrintJson -Data $data -Path $path -New
     $sha = Get-SmPrintFileHash -Path $path
     Add-SmPrintAudit -Folder $folder -Log $log -Line ('Zugriffe gesammelt: {0} Ereignisse 307{1}, {2} SMB-Sitzungen, {3} offene Druckdateien, Benutzernamen {5}, Rechnernamen {6}, SHA256 {4}' -f $data.Count, $(if ($got.Truncated) { ' (gekuerzt auf die neuesten)' } else { '' }), @($snap.SmbSessions).Count, @($snap.OpenFiles).Count, $sha, $(if ($Pseudonymize) { 'pseudonymisiert (HMAC)' } else { 'im Klartext' }), $(if ($PseudonymizeClients) { 'pseudonymisiert' } else { 'im Klartext' }))
     [pscustomobject]@{ Path = $path; Name = $name; Sha256 = $sha; Length = (Get-Item -LiteralPath $path).Length; Count = $data.Count; Log = @($log) }

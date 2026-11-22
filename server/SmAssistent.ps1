@@ -19,6 +19,12 @@ $script:SmAsStepKeys = @('Check', 'Dns', 'Dhcp', 'Print', 'Ad', 'Upload')
 $script:SmAsTitles = @{ Check = 'Server prüfen'; Dns = 'DNS'; Dhcp = 'DHCP'; Print = 'Druckserver'; Ad = 'Active Directory'; Upload = 'Ergebnisse hochladen' }
 $script:SmAsRoleOfStep = @{ Dns = 'Dns'; Dhcp = 'Dhcp'; Print = 'Print'; Ad = 'Ad' }
 $script:SmAsStagePattern = '^Sammlung-[0-9a-f]{32}$'
+# Dateinamen je Art (feste Muster; die Namen erzeugen die Sammelfunktionen, der Anteil vor der Endung enthaelt Rechnername, Zeitstempel und GUID-Teil)
+$script:SmAsNamePatterns = @{
+    DnsLogs = '^SM-DNS-[\w.\-]+\.zip$'; DhcpExport = '^DHCP-Export-[\w.\-]+\.zip$'
+    PrintExport = '^Print-Export-[\w.\-]+\.printerExport$'; PrintInventory = '^Print-Inventur-[\w.\-]+\.json$'; PrintAccess = '^Print-Zugriffe-[\w.\-]+\.json$'
+    AdReport = '^AD-Bericht-[\w.\-]+\.json$'
+}
 $script:SmAsMinFreeBytes = 2GB
 
 # ---------------------------------------------------------------- Zustaende und Navigation (reine Logik)
@@ -50,7 +56,7 @@ function New-SmAsState {
     <# Zustand des Assistenten: Schritte (Reihenfolge fest), aktueller Schritt, vorgemerkte Dateien, Sammelordner dieser Sitzung. #>
     $steps = [ordered]@{}
     foreach ($k in $script:SmAsStepKeys) { $steps[$k] = [pscustomobject]@{ Key = $k; Title = $script:SmAsTitles[$k]; State = 'Open'; Detail = '' } }
-    [pscustomobject]@{ Roles = $null; Steps = $steps; Current = 'Check'; Staged = (New-Object System.Collections.ArrayList); StageDir = $null; Results = @() }
+    [pscustomobject]@{ Roles = $null; Steps = $steps; Current = 'Check'; Staged = (New-Object System.Collections.ArrayList); Created = (New-Object System.Collections.ArrayList); StageDir = $null; Results = @() }
 }
 
 function Set-SmAsRoles {
@@ -163,23 +169,27 @@ function Get-SmAsAllowedRoots {
 }
 
 function Test-SmAsStagePath {
-    <# Prüft eine Datei: Name per Whitelist, direkt in einem erlaubten Ordner, kein ReparsePoint, nicht leer. Liefert den vollen Pfad oder wirft. #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Roots)
+    <# Prüft eine Datei: Name per festem Muster je Art (Kind), direkt in einem erlaubten Ordner, kein ReparsePoint, nicht leer, Besitzer Administratoren oder SYSTEM,
+       kein Allow-Eintrag für andere Konten (Sicherheits-Checkliste 13: eine schon vorher vorhandene Datei eines Nicht-Administrators wird nie vorgemerkt oder hochgeladen). Liefert den vollen Pfad oder wirft. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Roots, [Parameter(Mandatory)][string]$Kind)
     $full = [IO.Path]::GetFullPath($Path)
     $leaf = Split-Path -Leaf $full
-    if ($leaf -notmatch '^[\w.\-]+$' -or $leaf.Length -gt 200) { throw "Der Dateiname ist nicht erlaubt: $leaf" }
+    if (-not $script:SmAsNamePatterns.ContainsKey($Kind)) { throw "Unbekannte Art der Datei: $Kind" }
+    if ($leaf -notmatch '^[\w.\-]+$' -or $leaf.Length -gt 200 -or $leaf -notmatch $script:SmAsNamePatterns[$Kind]) { throw "Der Dateiname ist nicht erlaubt: $leaf" }
     $dir = (Split-Path -Parent $full).TrimEnd('\')
     if (-not (@($Roots | Where-Object { $_ -ieq $dir }).Count)) { throw 'Die Datei liegt nicht in einem erlaubten Ordner des Assistenten.' }
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Die Datei fehlt: $leaf" }
     foreach ($p in $dir, $full) { if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Verknüpfung (ReparsePoint) statt Datei oder Ordner, abgebrochen: $leaf" } }
     if ((Get-Item -LiteralPath $full -Force).Length -eq 0) { throw "Die Datei ist leer: $leaf" }
+    $bad = @(Test-SmSecureFile -Path $full)
+    if ($bad.Count) { throw ("Die Datei ist nicht sicher (Besitzer oder Zugriffsliste), nicht verwendet: $leaf " + ($bad -join ' ')) }
     $full
 }
 
 function Add-SmAsStaged {
     <# Merkt eine Datei für den Upload vor: Name, Größe, SHA256. Eine vorgemerkte Datei gleichen Namens wird ersetzt. Liefert den Eintrag. #>
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Path)
-    $full = Test-SmAsStagePath -Path $Path -Roots (Get-SmAsAllowedRoots -StageDir $State.StageDir)
+    $full = Test-SmAsStagePath -Path $Path -Roots (Get-SmAsAllowedRoots -StageDir $State.StageDir) -Kind $Kind
     $name = Split-Path -Leaf $full
     foreach ($old in @($State.Staged | Where-Object { $_.Name -ieq $name })) { $State.Staged.Remove($old) }
     $item = [pscustomobject]@{
@@ -187,7 +197,34 @@ function Add-SmAsStaged {
         Length = (Get-Item -LiteralPath $full -Force).Length; Sha256 = (Get-SmSha256Local -Path $full); Selected = $true
     }
     [void]$State.Staged.Add($item)
+    if (-not (@($State.Created | Where-Object { $_ -ieq $full }).Count)) { [void]$State.Created.Add($full) }   # fuer "Lokale Dateien dieser Sitzung löschen"
     $item
+}
+
+function Remove-SmAsSessionFiles {
+    <# Löscht alles, was diese Sitzung angelegt hat: die vorgemerkten und früher vorgemerkten Dateien in Print, AD und Sammelordner (nur direkt in einem erlaubten Ordner, keine Verknüpfung) und den Sammelordner. Liefert Removed (Zahl) und Failed (Meldungen). #>
+    param([Parameter(Mandatory)]$State)
+    $failed = New-Object System.Collections.Generic.List[string]; $left = New-Object System.Collections.ArrayList; $n = 0
+    $roots = Get-SmAsAllowedRoots -StageDir $State.StageDir
+    foreach ($p in @($State.Created)) {
+        try {
+            $full = [IO.Path]::GetFullPath([string]$p)
+            if (-not (@($roots | Where-Object { $_ -ieq (Split-Path -Parent $full).TrimEnd('\') }).Count)) { throw 'liegt nicht in einem erlaubten Ordner, nicht gelöscht' }
+            if (-not (Test-Path -LiteralPath $full)) { continue }
+            $it = Get-Item -LiteralPath $full -Force
+            if ($it.PSIsContainer -or ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'ist keine normale Datei (Verknüpfung oder Ordner), nicht gelöscht' }
+            Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+            $n++
+        }
+        catch { $failed.Add(('{0}: {1}' -f (Split-Path -Leaf ([string]$p)), $_.Exception.Message)); [void]$left.Add($p) }
+    }
+    if ($State.StageDir) {
+        try { Remove-SmAsStageDir -Dir $State.StageDir } catch { }
+        if (Test-Path -LiteralPath $State.StageDir) { $failed.Add('Sammelordner konnte nicht vollständig gelöscht werden.') } else { $State.StageDir = $null }
+    }
+    $State.Created.Clear(); foreach ($p in $left) { [void]$State.Created.Add($p) }
+    $State.Staged.Clear()
+    [pscustomobject]@{ Removed = $n; Failed = @($failed) }
 }
 
 function Clear-SmAsStaged {
@@ -254,7 +291,7 @@ function Publish-SmAsItems {
         $res = [pscustomobject]@{ Name = [string]$it.Name; Source = [string]$it.Source; Kind = [string]$it.Kind; Length = [long]$it.Length; Sha256 = [string]$it.Sha256; Ok = $false; Error = '' }
         $held = $null
         try {
-            $full = Test-SmAsStagePath -Path ([string]$it.Path) -Roots $Roots
+            $full = Test-SmAsStagePath -Path ([string]$it.Path) -Roots $Roots -Kind ([string]$it.Kind)
             $held = Open-SmDhcpHeldFile -Dir (Split-Path -Parent $full) -Path $full
             if ($held.Sha256 -ne [string]$it.Sha256) { throw 'Die Datei hat sich seit dem Vormerken geändert (SHA256 passt nicht). Bitte den Schritt erneut ausführen.' }
             & $Log ('Lade hoch ({0} von {1}): {2}' -f $i, $count, $res.Name)
@@ -275,10 +312,10 @@ function Publish-SmAsItems {
 }
 
 function Format-SmAsHash {
-    <# GekÃ¼rzte SHA256 fÃ¼r die Anzeige: erste 8 und letzte 4 Zeichen (wie der Chip). #>
+    <# Gekürzte SHA256 für die Anzeige: erste 8 und letzte 4 Zeichen (wie der Chip). #>
     param([string]$Sha)
     if ($Sha.Length -le 14) { return $Sha }
-    $Sha.Substring(0, 8) + 'â€¦' + $Sha.Substring($Sha.Length - 4)
+    $Sha.Substring(0, 8) + [string][char]0x2026 + $Sha.Substring($Sha.Length - 4)
 }
 
 function Format-SmAsChecksums {
@@ -311,9 +348,9 @@ function Get-SmAssistantUiNames {
         'BtnAsBack', 'BtnAsSkip', 'BtnAsNext', 'BtnAsCheck', 'TxtAsCheckState', 'PnlAsCheckRows',
         'BtnAsDnsRead', 'TxtAsDnsState', 'TxtAsDnsDetail', 'BoxAsDnsOff', 'TxtAsDnsPath', 'TxtAsDnsMax', 'BtnAsDnsEnable', 'BoxAsDnsOn', 'TxtAsDnsLogInfo', 'BtnAsDnsCollect', 'PrgAsDns', 'TxtAsDnsResult',
         'ChkAsDhcpNoLeases', 'BtnAsDhcp', 'TxtAsDhcpResult',
-        'TxtAsPrintLog', 'BtnAsPrintStatus', 'BtnAsPrintExport', 'TxtAsPrintDays', 'BtnAsPrintCollect', 'TxtAsPrintResult',
+        'TxtAsPrintLog', 'BtnAsPrintStatus', 'BtnAsPrintExport', 'TxtAsPrintDays', 'BtnAsPrintCollect', 'TxtAsPrintResult', 'ChkAsPrintPseudo', 'ChkAsPrintPseudoClient', 'TxtAsPrintKey', 'BtnAsPrintKeyNew', 'BtnAsPrintKeyCopy',
         'BtnAsAd', 'TxtAsAdResult',
-        'PnlAsFiles', 'TxtAsFilesEmpty', 'BtnAsUpload', 'TxtAsUploadState', 'BoxAsSummary', 'TxtAsSummary', 'BtnAsCopySha')
+        'PnlAsFiles', 'TxtAsFilesEmpty', 'BtnAsUpload', 'TxtAsUploadState', 'BoxAsSummary', 'TxtAsSummary', 'BtnAsCopySha', 'BtnAsClean', 'TxtAsCleanState')
     foreach ($k in $script:SmAsStepKeys) { $n += @("BdgAs$k", "TxtAsNum$k", "TxtAsState$k", "BtnAsGo$k", "PnlAs$k") }
     $n
 }
@@ -374,6 +411,8 @@ function Initialize-SmAssistantPage {
     $Ui.TxtAsDnsMax.Text = [string]$script:SmDnsDefaultMaxMB
     $Ui.TxtAsPrintDays.Text = '90'
     $Ui.BtnAsPrintCollect.IsEnabled = $false
+    $Ui.ChkAsPrintPseudo.IsChecked = $true
+    $Ui.TxtAsPrintKey.Text = New-SmPseudonymKey
     $Ui.BtnAsDnsCollect.IsEnabled = $false
     foreach ($k in $script:SmAsStepKeys) {
         $Ui["BtnAsGo$k"].Add_Click({ param($src, $e) Show-SmAsStep ([string]$src.Name.Substring(7)) })   # Schluessel aus dem Namen BtnAsGo<Schritt>; Tag bleibt dem Symbol vorbehalten
@@ -397,6 +436,9 @@ function Initialize-SmAssistantPage {
     $Ui.BtnAsPrintCollect.Add_Click({ Start-SmAsPrintCollect })
     $Ui.BtnAsAd.Add_Click({ Start-SmAsAd })
     $Ui.BtnAsUpload.Add_Click({ Start-SmAsUpload })
+    $Ui.BtnAsClean.Add_Click({ Start-SmAsClean })
+    $Ui.BtnAsPrintKeyNew.Add_Click({ $script:SmAs.Ui.TxtAsPrintKey.Text = New-SmPseudonymKey; Show-SmToast 'Neuer Schlüssel erzeugt.' })
+    $Ui.BtnAsPrintKeyCopy.Add_Click({ $c = $script:SmAs; [System.Windows.Clipboard]::SetText($c.Ui.TxtAsPrintKey.Text); Show-SmCopied -Button $c.Ui.BtnAsPrintKeyCopy })
     $Ui.BtnAsCopySha.Add_Click({
             $c = $script:SmAs; $txt = Format-SmAsChecksums -Results @($c.State.Results)
             if ($txt) { [System.Windows.Clipboard]::SetText($txt); Show-SmCopied -Button $c.Ui.BtnAsCopySha }
@@ -404,9 +446,56 @@ function Initialize-SmAssistantPage {
     Update-SmAsView
 }
 
+function Stop-SmAsJob {
+    <# Beendet den laufenden Auftrag (Timer aus, Runspace stoppen, höchstens 15 s warten). Liefert $true, wenn nichts mehr läuft. #>
+    $c = $script:SmAs
+    $j = $c.Job
+    if (-not $j) { return $true }
+    $c.Job = $null
+    try { $j.Timer.Stop() } catch { }
+    $done = $false
+    try {
+        if ($j.Handle -and $j.Handle.IsCompleted) { $done = $true }
+        else { $ar = $j.Ps.BeginStop($null, $null); $done = [bool]$ar.AsyncWaitHandle.WaitOne(15000) }
+    }
+    catch { $done = $true }   # schon beendet oder entsorgt
+    if ($done) { try { $j.Ps.Dispose() } catch { }; try { $j.Rs.Dispose() } catch { } }
+    $done
+}
+
 function Close-SmAssistantPage {
-    <# Beim Schließen des Fensters: den Sammelordner dieser Sitzung löschen (die Dateien in Print und AD bleiben, siehe Sicherheits-Checkliste 12). #>
-    if ($script:SmAs -and $script:SmAs.State.StageDir) { Remove-SmAsStageDir -Dir $script:SmAs.State.StageDir; $script:SmAs.State.StageDir = $null }
+    <# Beim Schließen des Fensters: zuerst den laufenden Auftrag beenden, dann den Sammelordner dieser Sitzung löschen (die Dateien in Print und AD bleiben, siehe Sicherheits-Checkliste 12). Fehler stehen im Protokoll. #>
+    $c = $script:SmAs
+    if (-not $c) { return }
+    $log = { param($m) try { & $c.Log $m } catch { } }
+    $stopped = $true
+    try { $stopped = Stop-SmAsJob } catch { & $log ('Aufräumen: laufender Auftrag nicht beendet: ' + $_.Exception.Message); $stopped = $false }
+    if (-not $stopped) { & $log 'Aufräumen: ein Auftrag läuft noch (Zeitüberschreitung beim Beenden), der Sammelordner wird trotzdem gelöscht.' }
+    $dir = $c.State.StageDir
+    if (-not $dir) { return }
+    try {
+        Remove-SmAsStageDir -Dir $dir
+        if (Test-Path -LiteralPath $dir) { & $log ('Aufräumen: der Sammelordner konnte nicht vollständig gelöscht werden: ' + $dir) } else { $c.State.StageDir = $null }
+    }
+    catch { & $log ('Aufräumen: Sammelordner nicht gelöscht: ' + $_.Exception.Message) }
+}
+
+function Start-SmAsClean {
+    <# Löscht alle lokalen Dateien dieser Sitzung (Sammlung, Print, AD). Mit Bestätigung; nach dem Löschen ist nichts mehr vorgemerkt. #>
+    $c = $script:SmAs; $u = $c.Ui; $st = $c.State
+    if ($c.Busy) { return }
+    if (-not $st.Created.Count -and -not $st.StageDir) { $u.TxtAsCleanState.Text = 'Es gibt nichts zu löschen.'; return }
+    if (-not (Confirm-SmAs "Alle lokalen Dateien löschen, die diese Sitzung angelegt hat (Sammelordner, Export, Inventur, Zugriffe, Bericht)?`n`nHochgeladene Dateien im Tauschordner bleiben. Nicht hochgeladene sind danach weg und müssen neu gesammelt werden." 'Lokale Dateien löschen')) { return }
+    Invoke-SmAsCleanNow
+}
+
+function Invoke-SmAsCleanNow {
+    $c = $script:SmAs; $u = $c.Ui; $st = $c.State
+    $r = Remove-SmAsSessionFiles -State $st
+    foreach ($f in $r.Failed) { & $c.Log ('Löschen: ' + $f) }
+    $u.TxtAsCleanState.Text = if ($r.Failed.Count) { '{0} Datei(en) gelöscht, {1} Problem(e), Einzelheiten im Protokoll.' -f $r.Removed, $r.Failed.Count } else { '{0} Datei(en) und der Sammelordner gelöscht.' -f $r.Removed }
+    & $c.Log ('Lokale Dateien dieser Sitzung: ' + $u.TxtAsCleanState.Text)
+    Update-SmAsFileList
 }
 
 function Get-SmAsStageDirSafe {
@@ -448,8 +537,9 @@ function Show-SmAsStep {
 function Set-SmAsBusy {
     param([bool]$Busy)
     $script:SmAs.Busy = $Busy
+    if (-not $Busy) { $script:SmAs.Job = $null }
     $u = $script:SmAs.Ui
-    foreach ($n in 'BtnAsCheck', 'BtnAsDnsRead', 'BtnAsDnsEnable', 'BtnAsDnsCollect', 'BtnAsDhcp', 'BtnAsPrintStatus', 'BtnAsPrintExport', 'BtnAsPrintCollect', 'BtnAsAd', 'BtnAsUpload', 'BtnUpload') { $u[$n].IsEnabled = -not $Busy }
+    foreach ($n in 'BtnAsCheck', 'BtnAsDnsRead', 'BtnAsDnsEnable', 'BtnAsDnsCollect', 'BtnAsDhcp', 'BtnAsPrintStatus', 'BtnAsPrintExport', 'BtnAsPrintCollect', 'BtnAsAd', 'BtnAsUpload', 'BtnAsClean', 'BtnUpload') { $u[$n].IsEnabled = -not $Busy }
     $u.PrgAsDns.Visibility = 'Collapsed'
     if (-not $Busy) {
         # Knöpfe, die vom Zustand abhängen, wieder passend setzen
@@ -479,7 +569,7 @@ function Start-SmAsJob {
     if (-not $KeepState) { Set-SmAsStepState -State $c.State -Key $Key -Value Running -Detail '' }
     Set-SmAsBusy $true
     if ($ProgressName) { $p = $c.Ui[$ProgressName]; $p.Value = 0; $p.Visibility = 'Visible' }
-    [void](Start-SmJob -Modules $c.Modules -Params $Params -Script $Script -OnTick { param($s) Write-SmAsJobLog $s; $cc = $script:SmAs; if ($cc.ProgressName -and $s.Total -gt 0) { $cc.Ui[$cc.ProgressName].Value = [math]::Min(100, 100 * $s.Sent / $s.Total) } } -OnDone {
+    $c.Job = (Start-SmJob -Modules $c.Modules -Params $Params -Script $Script -OnTick { param($s) Write-SmAsJobLog $s; $cc = $script:SmAs; if ($cc.ProgressName -and $s.Total -gt 0) { $cc.Ui[$cc.ProgressName].Value = [math]::Min(100, 100 * $s.Sent / $s.Total) } } -OnDone {
             param($result, $err)
             $c2 = $script:SmAs
             Set-SmAsBusy $false
@@ -659,12 +749,15 @@ function Start-SmAsPrintCollect {
     if (-not [int]::TryParse($u.TxtAsPrintDays.Text, [ref]$days) -or $days -lt 1 -or $days -gt 3650) { $u.TxtAsPrintResult.Text = 'Tage: eine ganze Zahl von 1 bis 3650.'; return }
     $pre = Test-SmPrintPrecheck -Mode Log
     if (-not $pre.Ok) { $u.TxtAsPrintResult.Text = "Vorprüfung nicht bestanden:`r`n" + (Format-SmPrecheck $pre); return }
-    if (-not (Confirm-SmAs ("Druckzugriffe der letzten {0} Tage sammeln?`n`nDatenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten und stehen hier im Klartext in der Datei (Pseudonyme gibt es auf der Seite Print). Die Datei wird für den Upload vorgemerkt, hochgeladen wird im letzten Schritt. Nach dem Projekt im Tauschordner und lokal löschen." -f $days) 'Zugriffe sammeln')) { & $c.Log 'Zugriffe sammeln abgebrochen.'; return }
+    $pseudo = [bool]$u.ChkAsPrintPseudo.IsChecked; $pseudoC = ($pseudo -and [bool]$u.ChkAsPrintPseudoClient.IsChecked); $key = $u.TxtAsPrintKey.Text.Trim()
+    if ($pseudo -and $key -notmatch '^[0-9A-Fa-f]{64}$') { $u.TxtAsPrintResult.Text = 'Der Schlüssel für die Pseudonyme muss aus 64 Hexzeichen bestehen. Mit "Neuer Schlüssel" erzeugen; für alle Sammlungen des Projekts denselben verwenden.'; return }
+    $hint = "Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten.`nBenutzernamen: {0}.`nRechnernamen: {1}.`nDie Datei wird für den Upload vorgemerkt, hochgeladen wird im letzten Schritt. Nach dem Projekt im Tauschordner und lokal löschen." -f $(if ($pseudo) { 'werden pseudonymisiert (HMAC-SHA256 mit dem zufälligen Schlüssel, der Schlüssel steht nicht in der Datei)' } else { 'stehen im Klartext in der Datei' }), $(if ($pseudoC) { 'werden pseudonymisiert' } else { 'stehen im Klartext in der Datei' })
+    if (-not (Confirm-SmAs ("Druckzugriffe der letzten {0} Tage sammeln?`n`n{1}" -f $days, $hint) 'Zugriffe sammeln')) { & $c.Log 'Zugriffe sammeln abgebrochen.'; return }
     Clear-SmAsStaged -State $c.State -Source 'PrintAccess'
     $u.TxtAsPrintResult.Text = 'Sammle …'
-    Start-SmAsJob -Key 'Print' -Params @{ Days = $days } -Script {
+    Start-SmAsJob -Key 'Print' -Params @{ Days = $days; Pseudo = $pseudo; PseudoC = $pseudoC; Key = $key } -Script {
         param($State, $P)
-        Invoke-SmPrintCollect -Days $P.Days
+        Invoke-SmPrintCollect -Days $P.Days -Pseudonymize:$P.Pseudo -PseudonymizeClients:$P.PseudoC -Key $P.Key
     } -OnOk {
         param($r)
         $c2 = $script:SmAs
@@ -749,7 +842,7 @@ function Start-SmAsUpload {
     $c.JobKey = 'Upload'; $c.KeepState = $false
     Set-SmAsStepState -State $st -Key 'Upload' -Value Running -Detail ''
     Set-SmAsBusy $true
-    [void](Start-SmJob -Modules $c.Modules -Params @{ Share = $share; Items = $sel; Roots = $roots } -Script {
+    $c.Job = (Start-SmJob -Modules $c.Modules -Params @{ Share = $share; Items = $sel; Roots = $roots } -Script {
             param($State, $P)
             Publish-SmAsItems -Share $P.Share -Items $P.Items -Roots $P.Roots -Log { param($m) $State.Log.Enqueue($m) } -Progress { param($i, $n, $name, $sent, $total) $State.Index = $i; $State.Name = $name; $State.Sent = $sent; $State.Total = $total }
         } -OnTick {
@@ -791,5 +884,8 @@ function Start-SmAsUpload {
             & $c2.Log ('Hochladen: ' + $u2.TxtAsUploadState.Text)
             try { & $c2.Refresh } catch { }
             Update-SmAsView
+            if (-not $bad -and (Confirm-SmAs "Alles hochgeladen.`n`nDie lokalen Dateien dieser Sitzung (Sammelordner, Export, Inventur, Zugriffe, Bericht) enthalten Kundendaten. Jetzt löschen?`n`nDie Prüfsummen bleiben in der Zusammenfassung und lassen sich weiter kopieren." 'Lokale Dateien löschen')) {
+                Invoke-SmAsCleanNow
+            }
         })
 }

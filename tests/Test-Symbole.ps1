@@ -70,6 +70,16 @@ Check 'Symbolbereich U+E000..F8FF nur aus der Liste und mit IconFont' ($bad.Pua.
 Check 'Button-Tag ist leer oder ein Symbolzeichen' ($bad.Tag.Count -eq 0) ($bad.Tag -join '; ')
 Check 'Schriftlisten haben Fallback (Segoe UI, Consolas, Segoe MDL2 Assets)' ($bad.Font.Count -eq 0) ($bad.Font -join '; ')
 Check 'AD-Server: adprep-Phase nicht aus dem Tag' ((Get-Content -LiteralPath (Join-Path $Repo 'server\SmAdServer.ps1') -Raw) -notmatch '\$sender\.Tag')
+# Kodierung: Windows PowerShell 5.1 liest .ps1 ohne BOM als ANSI. Nicht-ASCII ohne BOM ist verboten, doppelt kodierter Text (Zeichenmuell) auch.
+$encBad = @()
+foreach ($f in (Get-ChildItem -LiteralPath $Repo -Recurse -File -Include *.ps1, *.psm1 | Where-Object { $_.FullName -notmatch '[\/]\.git[\/]' })) {
+    $b = [IO.File]::ReadAllBytes($f.FullName)
+    $bom = ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+    $n = $f.FullName.Substring($Repo.Length + 1)
+    if (-not $bom -and @($b | Where-Object { $_ -gt 127 } | Select-Object -First 1).Count) { $encBad += "$n hat Nicht-ASCII ohne BOM" }
+    if ([Text.Encoding]::UTF8.GetString($b) -match '[\u00C2\u00C3\u00E2][\u0080-\u00BF\u0152\u0153\u0160\u0161\u0178\u017D\u017E\u0192\u02C6\u02DC\u2013\u2014\u2018-\u201E\u2020-\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]') { $encBad += "$n enthaelt doppelt kodierten Text" }
+}
+Check 'Kodierung: alle .ps1 sind ASCII oder UTF-8 mit BOM, keiner mit doppelt kodiertem Text' ($encBad.Count -eq 0) ($encBad -join '; ')
 # Liste gegen die installierte Schrift (Windows 10/11 und Server 2016 haben Segoe MDL2 Assets)
 Add-Type -AssemblyName PresentationCore
 $mdl = [System.Windows.Media.Fonts]::SystemTypefaces | Where-Object { $_.FontFamily.Source -eq 'Segoe MDL2 Assets' } | Select-Object -First 1

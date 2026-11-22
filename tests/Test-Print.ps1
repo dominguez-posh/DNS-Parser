@@ -236,7 +236,7 @@ $script:roleOk = $true
 $script:SmPrintBrmPath = Join-Path $stubDir 'nicht-da.exe'
 Check 'Vorpruefung: PrintBrm.exe fehlt blockiert' (-not (Test-SmPrintPrecheck -Mode Export).Ok)
 $script:SmPrintBrmPath = $brm
-Check 'Standardpfad von PrintBrm unter %windir%\System32\spool\tools' ((& { $script:SmPrintBrmPath = $null; Get-SmPrintBrmPath }) -eq (Join-Path $env:windir 'System32\spool\tools\PrintBrm.exe'))
+Check 'Standardpfad von PrintBrm unter %windir%\System32\spool\tools' ((& { $script:SmPrintBrmPath = $null; Get-SmPrintBrmPath }) -eq (Join-Path ([Environment]::GetFolderPath('System')) 'spool\tools\PrintBrm.exe'))
 $script:SmPrintBrmPath = $brm
 Check 'Vorpruefung Protokoll braucht nur Administrator' ((Test-SmPrintPrecheck -Mode Log).Ok -and @((Test-SmPrintPrecheck -Mode Log).Checks).Count -eq 1)
 
@@ -245,7 +245,11 @@ Check 'Export ohne Bestaetigung: abgelehnt' (ThrowsLike { Invoke-SmPrintExport }
 $ex = Invoke-SmPrintExport -Confirmed
 $brmArgs = (Get-Content -LiteralPath $env:SM_STUB_LOG -Raw).Trim()
 Check 'Export: PrintBrm -B -F <Datei im Sicherungsordner>' ($brmArgs -match '^-B -F "?[^"]+\.printerExport"?$' -and $brmArgs.Contains([IO.Path]::GetFullPath($made)))
-Check 'Export: Datei, SHA256 und Groesse' ((Test-Path $ex.Export.Path) -and $ex.Export.Sha256 -eq (Get-FileHash $ex.Export.Path -Algorithm SHA256).Hash -and $ex.Export.Name -match '^Print-Export-[A-Za-z0-9\-]+-\d{8}-\d{6}\.printerExport$')
+Check 'Export: Datei, SHA256 und Groesse' ((Test-Path $ex.Export.Path) -and $ex.Export.Sha256 -eq (Get-FileHash $ex.Export.Path -Algorithm SHA256).Hash -and $ex.Export.Name -match '^Print-Export-[A-Za-z0-9\-]+-\d{8}-\d{6}-[0-9a-f]{12}\.printerExport$')
+Check 'Export: PrintBrm schreibt in einen frischen Unterordner Export-<GUID> (nicht in den Sicherungsordner), danach verschoben ohne Ueberschreiben, Unterordner weg' ($brmArgs -match '\Export-[0-9a-f]{32}\Print-Export-' -and @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Export-*').Count -eq 0 -and (Split-Path -Parent $ex.Export.Path) -eq [IO.Path]::GetFullPath($made).TrimEnd('\') -and @(Test-SmSecureFile -Path $ex.Export.Path).Count -eq 0)
+$env:SM_STUB_EXIT = '5'
+Check 'Export: PrintBrm-Fehler -> Abbruch, kein Export-<GUID>-Ordner bleibt liegen' ((Throws { Invoke-SmPrintExport -Confirmed }) -and @(Get-ChildItem -LiteralPath $made -Directory -Filter 'Export-*').Count -eq 0)
+$env:SM_STUB_EXIT = '0'
 $invJson = Get-Content -LiteralPath $ex.Inventory.Path -Raw | ConvertFrom-Json
 Check 'Inventur: Drucker mit Freigabe, Veroeffentlichung, Standort, Kommentar' (@($invJson.Printers).Count -eq 2 -and $invJson.Printers[0].ShareName -eq 'HP-Buero-1' -and $invJson.Printers[0].Published -eq $true -and $invJson.Printers[0].Location -eq 'Haus A' -and $invJson.Printers[0].Comment -eq 'Testdrucker' -and $invJson.Role -eq 'alt')
 Check 'Inventur: Treiber mit Version, Architektur x64/x86 und Typ 3/4' ($invJson.Drivers[0].Version -eq '7.0.1.24923' -and $invJson.Drivers[0].Architecture -eq 'x64' -and $invJson.Drivers[0].DriverType -eq 3 -and $invJson.Drivers[1].Architecture -eq 'x86' -and $invJson.Drivers[1].DriverType -eq 4)
@@ -453,7 +457,7 @@ function Get-Printer { [CmdletBinding()] param() $script:printers }
 
 # Inventur nach dem Import
 $inv2 = New-SmPrintInventoryFile -Role 'neu' -Stage 'nachimport'
-Check 'Inventur nach Import: Datei Print-Inventur-...-nachimport-... und Rolle neu' ($inv2.Name -match '^Print-Inventur-[A-Za-z0-9\-]+-nachimport-\d{8}-\d{6}\.json$' -and (Read-SmPrintInventory -Path $inv2.Path).Role -eq 'neu')
+Check 'Inventur nach Import: Datei Print-Inventur-...-nachimport-... und Rolle neu' ($inv2.Name -match '^Print-Inventur-[A-Za-z0-9\-]+-nachimport-\d{8}-\d{6}-[0-9a-f]{12}\.json$' -and (Read-SmPrintInventory -Path $inv2.Path).Role -eq 'neu')
 
 # ---------------------------------------------------------------- 8. Druckprotokoll (wevtutil-Stub)
 $wevState = Join-Path $stubDir 'wev-state.json'
@@ -535,7 +539,7 @@ function Get-Process { [CmdletBinding()] param($Name) [pscustomobject]@{ Id = 12
 function Get-NetTCPConnection { [CmdletBinding()] param($OwningProcess, $State) @([pscustomobject]@{ RemoteAddress = '10.0.0.21'; RemotePort = 49500; LocalPort = 49152 }) }
 $col = Invoke-SmPrintCollect -Days 30
 Check 'Sammeln: Ereignis 307 im Protokoll PrintService/Operational abgefragt, StartTime gesetzt' ($script:winFilter.LogName -eq 'Microsoft-Windows-PrintService/Operational' -and $script:winFilter.Id -eq 307 -and $script:winFilter.StartTime -lt (Get-Date).AddDays(-29))
-Check 'Sammeln: 2 gueltige Ereignisse, kaputtes uebersprungen' ($col.Count -eq 2 -and $col.Name -match '^Print-Zugriffe-[A-Za-z0-9\-]+-\d{8}-\d{6}\.json$')
+Check 'Sammeln: 2 gueltige Ereignisse, kaputtes uebersprungen' ($col.Count -eq 2 -and $col.Name -match '^Print-Zugriffe-[A-Za-z0-9\-]+-\d{8}-\d{6}-[0-9a-f]{12}\.json$')
 $ra = Read-SmPrintAccess -Path $col.Path
 Check 'Sammeln: Datei vom Berater-Tool lesbar, Zeitraum, Ereignisfelder' (@($ra.Events).Count -eq 2 -and $ra.Events[0].Printer -eq 'HP-Buero-1' -and $ra.Events[0].Client -eq 'PC-ANNA' -and $ra.Events[1].User -eq 'bernd' -and $ra.Events[1].Pages -eq 1)
 $colRaw = Get-Content -LiteralPath $col.Path -Raw | ConvertFrom-Json

@@ -96,6 +96,15 @@
                     <TextBox x:Name="TxtAsPrintDays" Width="60" Padding="8,6" Margin="0,0,12,0" AutomationProperties.Name="Anzahl Tage für die Zugriffe"/>
                     <Button x:Name="BtnAsPrintCollect" Content="Zugriffe sammeln und vormerken"/>
                 </StackPanel>
+                <CheckBox x:Name="ChkAsPrintPseudo" Content="Benutzernamen pseudonymisieren (HMAC-SHA256 mit zufälligem Schlüssel)" Margin="0,10,0,0"/>
+                <CheckBox x:Name="ChkAsPrintPseudoClient" Content="Rechnernamen auch pseudonymisieren" Margin="0,6,0,0"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="Schlüssel" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{DynamicResource Text}"/>
+                    <TextBox x:Name="TxtAsPrintKey" Width="520" Padding="6,4" FontFamily="{DynamicResource MonoFont}" FontSize="12" Margin="0,0,8,0" AutomationProperties.Name="Schlüssel für Pseudonyme, 64 Hexzeichen"/>
+                    <Button x:Name="BtnAsPrintKeyNew" Content="Neuer Schlüssel" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnAsPrintKeyCopy" Content="Schlüssel kopieren"/>
+                </StackPanel>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,6,0,0" Text="Der Schlüssel steht nie in der Datei oder im Protokoll. Für alle Sammlungen eines Projekts denselben verwenden und getrennt aufbewahren."/>
                 <TextBlock x:Name="TxtAsPrintResult" Style="{DynamicResource Hint}" Margin="0,12,0,0"/>
             </StackPanel>
         </Border>
@@ -120,6 +129,10 @@
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                     <Button x:Name="BtnAsUpload" Content="Ausgewählte hochladen" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtAsUploadState" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}" TextWrapping="Wrap"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="BtnAsClean" Content="Lokale Dateien dieser Sitzung löschen" Margin="0,0,12,0"/>
+                    <TextBlock x:Name="TxtAsCleanState" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}" TextWrapping="Wrap"/>
                 </StackPanel>
                 <Border x:Name="BoxAsSummary" Style="{DynamicResource InfoBand}" Margin="0,16,0,0" Visibility="Collapsed">
                     <StackPanel>

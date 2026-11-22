@@ -557,7 +557,7 @@ Check 'DN: Gegentests (falscher CN, O nur als Teil, zweites O, O im Anfuehrungsz
     -not (Test-SmAdSignerSubject -Subject 'CN=Microsoft Corporation, O=Microsoft Corporation' -CommonNames @('Microsoft Windows')))
 Check 'Microsoft-Wurzeln: 40-stellige Thumbprints, Eintraege der lokalen Wurzelzertifikate "Microsoft Root Certificate Authority 20xx" sind in der Liste' ((@($script:SmAdMicrosoftRoots.Keys | Where-Object { $_ -notmatch '^[0-9A-F]{40}$' }).Count -eq 0) -and (@(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Where-Object { $_.Subject -match '^CN=Microsoft Root Certificate Authority 20(10|11),' } | Where-Object { -not $script:SmAdMicrosoftRoots.ContainsKey($_.Thumbprint.ToUpperInvariant()) }).Count -eq 0))
 Check 'Signatur echt: unsignierte Datei (Stub) -> nicht Microsoft-signiert' (-not (& $origSigned -Path $base))
-$sysExe = Join-Path $env:windir 'System32\whoami.exe'
+$sysExe = Join-Path ([Environment]::GetFolderPath('System')) 'whoami.exe'
 $sysInfo = Get-SmAdSignatureInfo -Path $sysExe
 if ($sysInfo.Status -eq 'Valid') {
     Check ('Signatur echt: Windows-Programm (whoami.exe) -> Signer Microsoft Windows / Microsoft Corporation, Kette in Microsoft-Wurzel ' + $sysInfo.RootThumbprint) ((& $origSigned -Path $sysExe) -and -not (& $origSigned -Path $sysExe -CommonNames @('Anderer Name')))

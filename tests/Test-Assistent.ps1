@@ -133,6 +133,108 @@ Check 'Vormerken: gleicher Name ersetzt den Eintrag (keine Doppelten)' ($(
         $st.Staged.Count -eq 3 -and @($st.Staged | Where-Object Name -eq 'SM-DNS-SRV01-20261122-100000.zip').Count -eq 1 -and @($st.Staged | Where-Object Name -eq 'SM-DNS-SRV01-20261122-100000.zip')[0].Length -eq 32))
 Clear-SmAsStaged -State $st -Source 'Dns'
 Check 'Neu sammeln: Eintrag eines Schritts entfernt, Datei im Sammelordner geloescht' ($st.Staged.Count -eq 2 -and -not (Test-Path -LiteralPath $f1))
+
+# ---------------------------------------------------------------- 5b. Ausgabedateien: CreateNew, Besitzer und ACL (Sicherheits-Checkliste 13), feste Namensmuster
+$vd = New-SmAsStageDir
+$ok1 = Join-Path $vd 'SM-DNS-SRV01-20261122-100000-0123456789ab.zip'; [IO.File]::WriteAllBytes($ok1, [byte[]](1..50))
+$stv = New-SmAsState; $stv.StageDir = $vd
+Check 'Vormerken: Datei mit eigenem Besitzer und gehaerteter ACL wird vorgemerkt (Gegenprobe)' ($(try { [void](Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'DnsLogs' -Path $ok1); $stv.Staged.Count -eq 1 } catch { $false }))
+# fremde ACE: eine vorher angelegte Datei, auf der ein anderes Konto (Jeder) Zugriff hat
+$foreignAce = Join-Path $vd 'SM-DNS-SRV01-20261122-100001-fremdace.zip'; [IO.File]::WriteAllBytes($foreignAce, [byte[]](1..50))
+$fa = [IO.File]::GetAccessControl($foreignAce); $fa.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Write', 'Allow'))); [IO.File]::SetAccessControl($foreignAce, $fa)
+$errAce = ''; try { [void](Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'DnsLogs' -Path $foreignAce) } catch { $errAce = $_.Exception.Message }
+Check 'GEGENTEST Vormerken: Datei mit fremder ACE (Jeder darf schreiben) wird nicht vorgemerkt' ($errAce -match 'nicht sicher' -and $errAce -match 'Zugriffsliste' -and -not @($stv.Staged | Where-Object Name -match 'fremdace').Count)
+# fremder Besitzer: erlaubte Konten ohne den Testbenutzer und ohne Administratoren
+$keepSids = $script:SmDnsStateSidsOverride; $script:SmDnsStateSidsOverride = @('S-1-5-18')
+$errOwn = ''; try { [void](Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'DnsLogs' -Path $ok1) } catch { $errOwn = $_.Exception.Message }
+$script:SmDnsStateSidsOverride = $keepSids
+Check 'GEGENTEST Vormerken: Datei mit fremdem Besitzer wird nicht vorgemerkt' ($errOwn -match 'nicht sicher' -and $errOwn -match 'Besitzer')
+$itCheck = $stv.Staged[0]
+$script:SmDnsStateSidsOverride = @('S-1-5-18')
+$resOwn = @(Publish-SmAsItems -Share ([pscustomobject]@{}) -Items @($itCheck) -Roots @(Get-SmAsAllowedRoots -StageDir $vd))
+$script:SmDnsStateSidsOverride = $keepSids
+Check 'GEGENTEST Hochladen: eine inzwischen fremde Datei wird nicht hochgeladen' ($resOwn.Count -eq 1 -and -not $resOwn[0].Ok -and $resOwn[0].Error -match 'nicht sicher')
+Check 'Test-SmSecureFile: fehlende Datei und Ordner statt Datei werden gemeldet' (@(Test-SmSecureFile -Path (Join-Path $vd 'gibtsnicht.zip')).Count -eq 1 -and @(Test-SmSecureFile -Path $vd).Count -eq 1)
+# Namensmuster je Art
+$pe = Join-Path $printDir 'Print-Export-SRV01-20261122-100000-0123456789ab.printerExport'; [IO.File]::WriteAllBytes($pe, [byte[]](1..9))
+Check 'Vormerken: Name passt nur zur eigenen Art (Print-Export als DnsLogs, unbekannte Art, fremdes Muster werden abgelehnt)' ((Throws { Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'DnsLogs' -Path $pe }) -and (Throws { Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'Unbekannt' -Path $ok1 }) -and (Throws { $x = Join-Path $vd 'beliebig.zip'; [IO.File]::WriteAllBytes($x, [byte[]](1..9)); Add-SmAsStaged -State $stv -Source 'Dns' -Kind 'DnsLogs' -Path $x }) -and (Add-SmAsStaged -State $stv -Source 'PrintExport' -Kind 'PrintExport' -Path $pe).Name -like 'Print-Export-*')
+# CreateNew
+$cn = Join-Path $vd 'vorher.json'; [IO.File]::WriteAllText($cn, 'ORIGINAL')
+Check 'CreateNew: Write-SmNewText ueberschreibt eine vorhandene Datei nie (wirft, Inhalt unveraendert)' ((Throws { Write-SmNewText -Path $cn -Text 'NEU' }) -and ([IO.File]::ReadAllText($cn) -eq 'ORIGINAL'))
+$np = New-SmUniquePath -Folder $vd -Name 'Print-Inventur-X-20261122-100000.json'
+$np2 = New-SmUniquePath -Folder $vd -Name 'Print-Inventur-X-20261122-100000.json'
+Check 'CreateNew: neuer Name mit GUID-Anteil vor der Endung, jedes Mal ein anderer, die Datei gibt es noch nicht' ((Split-Path -Leaf $np) -match '^Print-Inventur-X-20261122-100000-[0-9a-f]{12}\.json$' -and $np -ne $np2 -and -not (Test-Path -LiteralPath $np))
+Write-SmNewText -Path $np -Text 'x'
+Check 'CreateNew: die neue Datei gehoert dem Testbenutzer oder den Administratoren und hat keine fremde ACE' (@(Test-SmSecureFile -Path $np).Count -eq 0)
+$ov = [ordered]@{ Created = 'x'; Computer = 'SRV01'; Forest = [ordered]@{ Name = 'contoso.local' }; DomainLevels = @() }
+$r1 = New-SmAdReport -Overview $ov; $r2 = New-SmAdReport -Overview $ov
+Check 'AD-Bericht: jedes Mal eine neue Datei mit GUID-Anteil (nie eine vorhandene ueberschrieben), Name passt zum Muster der Art AdReport' ($r1 -ne $r2 -and (Test-Path -LiteralPath $r1) -and (Test-Path -LiteralPath $r2) -and (Split-Path -Leaf $r1) -match $script:SmAsNamePatterns['AdReport'] -and (Split-Path -Leaf $r1) -match '-[0-9a-f]{12}\.json$')
+Remove-SmAsStageDir -Dir $vd
+
+# Lokale Dateien dieser Sitzung loeschen
+$cs = New-SmAsState; $cs.StageDir = New-SmAsStageDir
+$cf1 = Join-Path $cs.StageDir 'SM-DNS-SRV01-20261122-110000-aaaaaaaaaaaa.zip'; [IO.File]::WriteAllBytes($cf1, [byte[]](1..30))
+$cf2 = Join-Path $printDir 'Print-Inventur-SRV01-20261122-110000-bbbbbbbbbbbb.json'; [IO.File]::WriteAllText($cf2, '{"a":1}')
+$cf3 = Join-Path $adDir 'AD-Bericht-SRV01-20261122-110000-cccccccccccc.json'; [IO.File]::WriteAllText($cf3, '{"a":1}')
+$cfOther = Join-Path $printDir 'Print-Export-NICHT-VON-DIESER-SITZUNG.printerExport'; [IO.File]::WriteAllBytes($cfOther, [byte[]](1..9))
+[void](Add-SmAsStaged -State $cs -Source 'Dns' -Kind 'DnsLogs' -Path $cf1); [void](Add-SmAsStaged -State $cs -Source 'PrintExport' -Kind 'PrintInventory' -Path $cf2); [void](Add-SmAsStaged -State $cs -Source 'Ad' -Kind 'AdReport' -Path $cf3)
+Clear-SmAsStaged -State $cs -Source 'Ad'   # Neu sammeln: aus der Liste, aber die Datei in AD bleibt liegen
+$stageBefore = $cs.StageDir
+$rc = Remove-SmAsSessionFiles -State $cs
+Check 'Lokale Dateien loeschen: Sammelordner samt Datei, Print- und AD-Datei dieser Sitzung (auch die nicht mehr vorgemerkte) sind weg' ($rc.Removed -eq 3 -and -not (Test-Path -LiteralPath $stageBefore) -and -not (Test-Path -LiteralPath $cf2) -and -not (Test-Path -LiteralPath $cf3) -and $rc.Failed.Count -eq 0 -and -not $cs.StageDir -and $cs.Staged.Count -eq 0)
+Check 'Lokale Dateien loeschen: eine Datei, die nicht aus dieser Sitzung stammt, bleibt unberuehrt' (Test-Path -LiteralPath $cfOther)
+Check 'Lokale Dateien loeschen: zweiter Aufruf ohne Dateien wirft nicht und meldet nichts' ($(try { $r0 = Remove-SmAsSessionFiles -State $cs; $r0.Removed -eq 0 -and $r0.Failed.Count -eq 0 } catch { $false }))
+# nicht loeschbar (offen gehalten): Meldung statt stiller Fehler, Datei bleibt vermerkt
+$cs2 = New-SmAsState; $cs2.StageDir = New-SmAsStageDir
+$cf4 = Join-Path $printDir 'Print-Inventur-SRV01-20261122-110001-dddddddddddd.json'; [IO.File]::WriteAllText($cf4, '{"a":1}')
+[void](Add-SmAsStaged -State $cs2 -Source 'PrintExport' -Kind 'PrintInventory' -Path $cf4)
+$lock = New-Object IO.FileStream($cf4, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try { $rc2 = Remove-SmAsSessionFiles -State $cs2 } finally { $lock.Dispose() }
+Check 'Lokale Dateien loeschen: eine gesperrte Datei wird gemeldet (Failed nennt den Namen) und bleibt vermerkt, der Rest ist geloescht' ($rc2.Failed.Count -ge 1 -and ($rc2.Failed -join ' ') -match 'Print-Inventur-SRV01' -and $cs2.Created.Count -eq 1 -and (Test-Path -LiteralPath $cf4))
+$rc3 = Remove-SmAsSessionFiles -State $cs2
+Check 'Lokale Dateien loeschen: nach dem Freigeben klappt der zweite Versuch' ($rc3.Removed -eq 1 -and $rc3.Failed.Count -eq 0 -and -not (Test-Path -LiteralPath $cf4))
+Remove-Item -LiteralPath $cfOther -Force
+
+# Schliessen: zuerst Auftrag beenden, dann loeschen, Fehler im Protokoll
+$keepAs = $script:SmAs
+$closeLog = New-Object System.Collections.ArrayList
+$cs3 = New-SmAsState; $cs3.StageDir = New-SmAsStageDir
+$cf5 = Join-Path $cs3.StageDir 'SM-DNS-SRV01-20261122-110002-eeeeeeeeeeee.zip'; [IO.File]::WriteAllBytes($cf5, [byte[]](1..30))
+$rsJ = [runspacefactory]::CreateRunspace(); $rsJ.Open(); $psJ = [powershell]::Create(); $psJ.Runspace = $rsJ
+[void]$psJ.AddScript('Start-Sleep -Seconds 60'); $hJ = $psJ.BeginInvoke()
+$timerStub = [pscustomobject]@{ Stopped = $false }; $timerStub | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
+$script:SmAs = @{ State = $cs3; Log = { param($m) [void]$closeLog.Add($m) }; Job = @{ Ps = $psJ; Rs = $rsJ; Handle = $hJ; Timer = $timerStub } }
+$lockC = New-Object IO.FileStream($cf5, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+$stageC = $cs3.StageDir
+Close-SmAssistantPage
+Check 'Schliessen: laufender Auftrag wird beendet (Timer aus, Runspace gestoppt), Job-Verweis geloescht' ($timerStub.Stopped -and $hJ.IsCompleted -and -not $script:SmAs.Job)
+Check 'Schliessen: Sammelordner nicht loeschbar (Datei offen) -> Meldung im Protokoll, kein Absturz, Ordner bleibt vermerkt' ((($closeLog -join '|') -match 'nicht vollst') -and $cs3.StageDir -eq $stageC)
+$lockC.Dispose(); $closeLog.Clear()
+Close-SmAssistantPage
+Check 'Schliessen: zweiter Versuch loescht den Sammelordner, kein Protokolleintrag' (-not (Test-Path -LiteralPath $stageC) -and -not $cs3.StageDir -and $closeLog.Count -eq 0)
+$script:SmAs = @{ State = (New-SmAsState); Log = { param($m) }; Job = $null }
+Check 'Schliessen: ohne Sammelordner und ohne Auftrag kein Fehler' ($(try { Close-SmAssistantPage; $true } catch { $false }))
+$script:SmAs = $null; Check 'Schliessen: ohne Sitzung kein Fehler' ($(try { Close-SmAssistantPage; $true } catch { $false }))
+$script:SmAs = $keepAs
+
+# Systemordner: nicht aus %windir%/%SystemRoot% (Umgebungsvariablen sind fuer Sicherheitsentscheidungen nicht verlaesslich)
+$sysDir = [Environment]::GetFolderPath('System')
+$keepWin = $env:windir; $keepRoot = $env:SystemRoot
+$env:windir = 'C:\evil'; $env:SystemRoot = 'C:\evil'
+$script:SmPrintBrmPath = $null; $script:SmWevtutilPath = $null; $script:SmAdToolPaths = @{}
+$pBrm = Get-SmPrintBrmPath; $pWev = Get-SmWevtutilPath; $pRep = Get-SmAdToolPath -Name repadmin; $pNtds = Get-SmAdToolPath -Name ntdsutil; $pDns = Get-SmDnsAllowedDir
+$env:windir = $keepWin; $env:SystemRoot = $keepRoot
+Check 'Systemordner: DNS-Ordner, PrintBrm, wevtutil, repadmin und ntdsutil kommen aus GetFolderPath(System), auch wenn %windir% und %SystemRoot% veraendert sind' ($pDns -eq (Join-Path $sysDir 'dns') -and $pBrm -eq (Join-Path $sysDir 'spool\tools\PrintBrm.exe') -and $pWev -eq (Join-Path $sysDir 'wevtutil.exe') -and $pRep -eq (Join-Path $sysDir 'repadmin.exe') -and $pNtds -eq (Join-Path $sysDir 'ntdsutil.exe') -and $pBrm -notmatch 'evil')
+Check 'Systemordner: Standardpfad der DNS-Logdatei = System32\dns\dns.log aus GetFolderPath, nicht aus %windir%' ($script:SmDnsDefaultPath -eq (Join-Path $sysDir 'dns\dns.log'))
+$envUse = @(Get-ChildItem -LiteralPath $Repo -Recurse -File -Include *.ps1 | Where-Object { $_.FullName -notlike '*\tests\*' -and $_.FullName -notlike '*\.git\*' } | Select-String -Pattern 'env:windir|env:SystemRoot' | Where-Object { ($_.Line -replace '#.*$', '') -match 'env:windir|env:SystemRoot' })
+Check 'Systemordner: kein Code im Repo (ausser Tests) liest $env:windir oder $env:SystemRoot' ($envUse.Count -eq 0) (($envUse | ForEach-Object { $_.Path + ':' + $_.LineNumber }) -join '; ')
+
+# Anzeige und Quelltext
+Check 'Format-SmAsHash: Auslassungszeichen ist U+2026 (kein Zeichenmuell), gekuerzt auf 8 + Zeichen + 4' ((Format-SmAsHash ('A' * 64)) -eq ('AAAAAAAA' + [string][char]0x2026 + 'AAAA') -and (Format-SmAsHash 'ABC') -eq 'ABC')
+$asRaw = Get-Content -LiteralPath (Join-Path $Repo 'server\SmAssistent.ps1') -Raw -Encoding UTF8
+Check 'SmAssistent.ps1: kein doppelt kodierter Text (UTF-8 als ANSI gelesen und wieder gespeichert)' ($asRaw -notmatch '[\u00C2\u00C3\u00E2][\u0080-\u00BF\u0152\u0153\u0160\u0161\u0178\u017D\u017E\u0192\u02C6\u02DC\u2013\u2014\u2018-\u201E\u2020-\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]')
+$asSrc = $asRaw
+Check 'Print-Schritt: Pseudonym-Auswahl und Schluessel werden an Invoke-SmPrintCollect uebergeben (Zufallsschluessel, HMAC, Rechnernamen optional)' ($asSrc -match 'Invoke-SmPrintCollect -Days \$P\.Days -Pseudonymize:\$P\.Pseudo -PseudonymizeClients:\$P\.PseudoC -Key \$P\.Key' -and $asSrc -match 'New-SmPseudonymKey' -and $asSrc -match 'ChkAsPrintPseudoClient')
 Clear-SmAsStaged -State $st -Source 'PrintExport'
 Check 'Neu sammeln: Dateien in Print bleiben liegen (nur die Liste wird leer)' (Test-Path -LiteralPath $f2)
 Check 'Sammelordner loeschen: nur Sammlung-<GUID> direkt unter Assistent' ($(
@@ -201,8 +303,8 @@ Remove-Item Function:\Get-SmAdOverview, Function:\New-SmAdReport, Function:\Send
 # ---------------------------------------------------------------- 7. Hochladen gegen den nachgebauten SharePoint
 if ($Share -and $Store) {
     $st = New-SmAsState; $stage = New-SmAsStageDir; $st.StageDir = $stage
-    $small = Join-Path $stage 'SM-Test-klein.zip'; [IO.File]::WriteAllText($small, ('k' * 5000))
-    $big = Join-Path $stage 'SM-Test-gross.zip'; $rnd = New-Object byte[] (64KB * 3 + 777); (New-Object Random 7).NextBytes($rnd); [IO.File]::WriteAllBytes($big, $rnd)
+    $small = Join-Path $stage 'SM-DNS-klein.zip'; [IO.File]::WriteAllText($small, ('k' * 5000))
+    $big = Join-Path $stage 'DHCP-Export-gross.zip'; $rnd = New-Object byte[] (64KB * 3 + 777); (New-Object Random 7).NextBytes($rnd); [IO.File]::WriteAllBytes($big, $rnd)
     $tamper = Join-Path $printDir 'Print-Export-TEST.printerExport'; [IO.File]::WriteAllBytes($tamper, [byte[]](1..120))
     $itSmall = Add-SmAsStaged -State $st -Source 'Dns' -Kind 'DnsLogs' -Path $small
     $itBig = Add-SmAsStaged -State $st -Source 'Dhcp' -Kind 'DhcpExport' -Path $big
@@ -214,18 +316,18 @@ if ($Share -and $Store) {
             -Progress { param($i, $n, $name, $sent, $total) [void]$prog.Add(('{0}/{1}/{2}/{3}/{4}' -f $i, $n, $name, $sent, $total)) } -Log { param($m) [void]$logs.Add($m) })
     Check 'Upload: je Datei ein Ergebnis, in der Reihenfolge der Liste' ($res.Count -eq 3 -and $res[0].Name -eq 'Print-Export-TEST.printerExport')
     Check 'Upload: veraenderte Datei wird NICHT hochgeladen (SHA256 passt nicht zum Vormerken), Fehlertext nennt es' (-not $res[0].Ok -and $res[0].Error -match 'ge.ndert' -and -not $Store.ContainsKey('Print-Export-TEST.printerExport'))
-    $rs = $res | Where-Object Name -eq 'SM-Test-klein.zip'; $rb = $res | Where-Object Name -eq 'SM-Test-gross.zip'
-    Check 'Upload: der Fehler der ersten Datei stoppt die anderen nicht, beide sind hochgeladen' ($rs.Ok -and $rb.Ok -and $Store.ContainsKey('SM-Test-klein.zip') -and $Store.ContainsKey('SM-Test-gross.zip'))
-    Check 'Upload: Inhalt im Tauschordner gleich der lokalen Datei (SHA256), auch die grosse in Teilen' ((Get-SmSha256Bytes -Bytes $Store['SM-Test-gross.zip']) -eq $itBig.Sha256 -and (Get-SmSha256Bytes -Bytes $Store['SM-Test-klein.zip']) -eq $itSmall.Sha256 -and $rb.Length -eq $rnd.Length)
+    $rs = $res | Where-Object Name -eq 'SM-DNS-klein.zip'; $rb = $res | Where-Object Name -eq 'DHCP-Export-gross.zip'
+    Check 'Upload: der Fehler der ersten Datei stoppt die anderen nicht, beide sind hochgeladen' ($rs.Ok -and $rb.Ok -and $Store.ContainsKey('SM-DNS-klein.zip') -and $Store.ContainsKey('DHCP-Export-gross.zip'))
+    Check 'Upload: Inhalt im Tauschordner gleich der lokalen Datei (SHA256), auch die grosse in Teilen' ((Get-SmSha256Bytes -Bytes $Store['DHCP-Export-gross.zip']) -eq $itBig.Sha256 -and (Get-SmSha256Bytes -Bytes $Store['SM-DNS-klein.zip']) -eq $itSmall.Sha256 -and $rb.Length -eq $rnd.Length)
     Check 'Upload: Ergebnis traegt die vorgemerkte SHA256 und die Groesse' ($rb.Sha256 -eq $itBig.Sha256 -and $rs.Length -eq 5000)
-    $bigProg = @($prog | Where-Object { $_ -like '*SM-Test-gross.zip*' })
-    Check 'Upload: Fortschritt je Datei (Index, Anzahl, Name, gesendet, gesamt), die grosse in 4 Teilen bis 100 Prozent' ($bigProg.Count -eq 4 -and $bigProg[-1] -match "/3/SM-Test-gross.zip/$($rnd.Length)/$($rnd.Length)$" -and @($prog | Where-Object { $_ -like '*SM-Test-klein.zip*' }).Count -ge 1 -and ($prog[0] -notlike '*Print-Export*'))
+    $bigProg = @($prog | Where-Object { $_ -like '*DHCP-Export-gross.zip*' })
+    Check 'Upload: Fortschritt je Datei (Index, Anzahl, Name, gesendet, gesamt), die grosse in 4 Teilen bis 100 Prozent' ($bigProg.Count -eq 4 -and $bigProg[-1] -match "/3/DHCP-Export-gross.zip/$($rnd.Length)/$($rnd.Length)$" -and @($prog | Where-Object { $_ -like '*SM-DNS-klein.zip*' }).Count -ge 1 -and ($prog[0] -notlike '*Print-Export*'))
     Check 'Upload: Protokollzeilen fuer Hochladen, Fehler und Ergebnis, ohne Link' (($logs -join '|') -match 'Lade hoch \(' -and ($logs -join '|') -match 'Fehler bei Print-Export-TEST' -and ($logs -join '|') -notmatch 'sharepoint|http')
     Check 'Upload: Dateien sind danach nicht mehr gesperrt (Handle freigegeben)' ($(try { Remove-Item -LiteralPath $small -Force; $true } catch { $false }))
     $sum = Format-SmAsSummary -Results $res
-    Check 'Zusammenfassung: Anzahl, Namen mit Groesse und gekuerzter SHA256, Fehler mit Grund' ($sum -match '2 von 3 Dateien' -and $sum -match 'SM-Test-gross.zip' -and $sum -match 'FEHLER Print-Export-TEST' -and $sum -match ($itBig.Sha256.Substring(0, 8)))
+    Check 'Zusammenfassung: Anzahl, Namen mit Groesse und gekuerzter SHA256, Fehler mit Grund' ($sum -match '2 von 3 Dateien' -and $sum -match 'DHCP-Export-gross.zip' -and $sum -match 'FEHLER Print-Export-TEST' -and $sum -match ($itBig.Sha256.Substring(0, 8)))
     $cs = Format-SmAsChecksums -Results $res
-    Check 'Pruefsummen-Text: nur die hochgeladenen Dateien, vollstaendige SHA256, je Zeile Bezeichnung: Wert' (($cs -split "`r`n").Count -eq 2 -and $cs -match ('SM-Test-gross.zip: ' + $itBig.Sha256) -and $cs -notmatch 'Print-Export')
+    Check 'Pruefsummen-Text: nur die hochgeladenen Dateien, vollstaendige SHA256, je Zeile Bezeichnung: Wert' (($cs -split "`r`n").Count -eq 2 -and $cs -match ('DHCP-Export-gross.zip: ' + $itBig.Sha256) -and $cs -notmatch 'Print-Export')
     $resPrint = @([pscustomobject]@{ Name = 'Print-Export-A.printerExport'; Kind = 'PrintExport'; Ok = $true; Sha256 = ('A' * 64) }, [pscustomobject]@{ Name = 'Print-Inventur-A.json'; Kind = 'PrintInventory'; Ok = $true; Sha256 = ('B' * 64) })
     $csp = Format-SmAsChecksums -Results $resPrint
     Check 'Pruefsummen-Text: Print als "Export:" und "Inventur:" (so liest ihn die Seite Print am neuen Server, Get-SmPastedSha)' ($csp -eq ("Export: " + ('A' * 64) + "`r`nInventur: " + ('B' * 64)) -and (Get-SmPastedSha $csp 'Export') -match ('^' + ('A' * 64)) -and (Get-SmPastedSha $csp 'Inventur') -match ('^' + ('B' * 64)))
