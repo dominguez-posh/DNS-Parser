@@ -20,9 +20,9 @@
                     <Button x:Name="BtnForget" Content="Gemerkte Verbindung löschen" Style="{DynamicResource LinkButton}" Visibility="Collapsed"/>
                 </StackPanel>
                 <TextBlock x:Name="TxtListState" Text="Nicht verbunden" Foreground="{DynamicResource MutedText}" Margin="0,10,0,0"/>
-                <Border x:Name="BoxConflict" Visibility="Collapsed" Background="{DynamicResource WarningBg}" CornerRadius="6" Padding="12,10" Margin="0,10,0,0">
+                <Border x:Name="BoxConflict" Style="{DynamicResource WarnBand}" Visibility="Collapsed" Margin="0,10,0,0">
                     <StackPanel>
-                        <TextBlock x:Name="TxtConflict" Foreground="{DynamicResource Warning}" TextWrapping="Wrap" FontWeight="SemiBold"/>
+                        <DockPanel><TextBlock DockPanel.Dock="Left" Style="{DynamicResource BandGlyph}" Foreground="{DynamicResource Warning}" Text="&#xE7BA;"/><TextBlock x:Name="TxtConflict" Style="{DynamicResource BandText}"/></DockPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0"><Button x:Name="BtnConflictMerge" Content="Zusammenführen" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/><Button x:Name="BtnConflictReload" Content="Neu laden (Änderung verwerfen)"/></StackPanel>
                     </StackPanel>
                 </Border>

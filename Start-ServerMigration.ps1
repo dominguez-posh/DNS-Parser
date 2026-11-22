@@ -22,6 +22,7 @@ $ToolVersion = '0.1.0'
 $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmTheme.ps1')
 . (Join-Path $root 'Modules\SmShell.ps1')
+. (Join-Path $root 'Modules\SmUi.ps1')
 . (Join-Path $root 'Modules\SmTausch.ps1')
 . (Join-Path $root 'Modules\SmPaket.ps1')
 . (Join-Path $root 'Modules\SmProjekte.ps1')
@@ -37,55 +38,7 @@ $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'M
 $dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'))
 $printJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'))
 
-$startPage = @'
-<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
-    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
-        <TextBlock Text="Tauschordner und Server-Paket" Style="{DynamicResource PageTitle}"/>
-        <TextBlock Style="{DynamicResource Subtitle}" Text="Der Tauschordner ist ein SharePoint- oder OneDrive-Ordner, der mit 'Jeder mit dem Link kann bearbeiten' geteilt ist. Darüber kommt das Server-Paket zum Kunden und kommen Ergebnisse zurück."/>
-
-        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
-            <StackPanel>
-                <TextBlock Text="1  Tauschordner verbinden" Style="{DynamicResource CardTitle}"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Freigabelink des Ordners einfügen. Ablaufdatum setzen und den Link nach dem Projekt löschen."/>
-                <TextBox x:Name="TxtLink" Padding="8,6" AutomationProperties.Name="Freigabelink des Tauschordners"/>
-                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button x:Name="BtnConnect" Content="Verbinden" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
-                    <TextBlock x:Name="TxtShareState" Text="Nicht verbunden" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
-                </StackPanel>
-                <TextBox x:Name="TxtFiles" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" MaxHeight="120" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" Visibility="Collapsed"/>
-            </StackPanel>
-        </Border>
-
-        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
-            <StackPanel>
-                <TextBlock Text="2  Server-Paket ablegen" Style="{DynamicResource CardTitle}"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Baut das Paket für das Server-Fenster, legt es im Tauschordner ab (große Dateien in Teilen) und erzeugt den Einzeiler mit Prüfsumme."/>
-                <StackPanel Orientation="Horizontal">
-                    <Button x:Name="BtnPublish" Content="Paket ablegen" Style="{DynamicResource PrimaryButton}" IsEnabled="False" Margin="0,0,12,0"/>
-                    <TextBlock x:Name="TxtProgress" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
-                </StackPanel>
-                <ProgressBar x:Name="PrgUpload" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-            </StackPanel>
-        </Border>
-
-        <Border x:Name="BoxOneLiner" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16" Visibility="Collapsed">
-            <StackPanel>
-                <TextBlock Text="3  Einzeiler für den Server" Style="{DynamicResource CardTitle}"/>
-                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" Text="Auf dem Server in einer PowerShell einfügen (Administrator). Stimmt die Prüfsumme nicht, wird nichts ausgeführt. Die Skriptfreigabe gilt nur für diesen PowerShell-Prozess."/>
-                <TextBlock Foreground="{DynamicResource Warning}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,8" Text="Link mit kurzem Ablaufdatum anlegen und nach dem Projekt löschen."/>
-                <TextBox x:Name="TxtOneLiner" Style="{DynamicResource SelectableText}" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140" VerticalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
-                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button x:Name="BtnCopy" Content="Einzeiler kopieren" Tag="&#xE8C8;" Margin="0,0,12,0"/>
-                    <TextBlock x:Name="TxtSha" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
-                </StackPanel>
-            </StackPanel>
-        </Border>
-
-        <TextBlock Text="Protokoll" Style="{DynamicResource FieldLabel}" Margin="0,20,0,6"/>
-        <TextBox x:Name="TxtLog" Style="{DynamicResource SelectableText}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" MaxHeight="220" VerticalScrollBarVisibility="Auto" FontSize="12"/>
-    </StackPanel>
-</ScrollViewer>
-'@
+$startPage = [IO.File]::ReadAllText((Join-Path $root 'UI\Tausch.xaml'), [Text.Encoding]::UTF8).Replace('<!--PROTOKOLL-->', (Get-SmLogCardXaml))
 
 $pages = @(
     @{ Key = 'Start'; Title = 'Tauschordner'; Glyph = 0xE753; Xaml = $startPage }
@@ -97,10 +50,15 @@ $pages = @(
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Berater-Tool' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
-Test-SmWindowNames @('TxtLink', 'BtnConnect', 'TxtShareState', 'TxtFiles', 'BtnPublish', 'TxtProgress', 'PrgUpload', 'BoxOneLiner', 'TxtOneLiner', 'BtnCopy', 'TxtSha', 'TxtLog',
+Test-SmWindowNames @('TxtLink', 'BtnConnect', 'TxtShareState', 'TxtFiles', 'BtnPublish', 'TxtProgress', 'PrgUpload', 'BoxOneLiner', 'TxtOneLiner', 'TxtOneLinerPreview', 'BoxCmdPreview', 'BtnCmdToggle', 'BtnCopy', 'BtnCopySha', 'TxtSha', 'BdgStep1', 'TxtStep1', 'BdgStep2', 'TxtStep2', 'BdgStep3', 'TxtStep3',
     'BtnDnsFind', 'BtnDnsLoad', 'BtnDnsOpen', 'BtnDnsCancel', 'LstDnsZips', 'CmbDnsDate', 'ChkDnsReverse', 'PrgDnsLoad', 'TxtDnsLoad', 'TxtDnsPeriod', 'CmbDnsView', 'TxtDnsFilter', 'BtnDnsApply', 'BtnDnsExport', 'GrdDns', 'TxtDnsCount',
     'NavStart', 'NavProjekte', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 Test-SmWindowNames @('BtnDhcpFind', 'BtnDhcpCompare', 'BtnDhcpExport', 'CmbDhcpBefore', 'CmbDhcpAfter', 'ChkDhcpEqual', 'TxtDhcpState', 'TxtDhcpCount', 'GrdDhcp')
+Test-SmWindowNames (Get-SmLogUiNames)
+Initialize-SmLog -Ui $ui
+Initialize-SmCodeBoxes -Ui $ui
+Initialize-SmCommandBox -Ui $ui
+Set-SmStepState -Ui $ui
 Test-SmWindowNames (Get-SmProjectUiNames)
 Test-SmWindowNames (Get-SmAdPageUiNames)
 $script:Share = $null
@@ -110,8 +68,7 @@ Test-SmWindowNames (Get-SmPrintPageUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
 
 function Add-Log([string]$Line) {
-    $ui.TxtLog.AppendText(('{0:HH:mm:ss}  {1}' -f (Get-Date), $Line) + "`r`n")
-    $ui.TxtLog.ScrollToEnd()
+    Add-SmLogLine -Ui $ui -Line $Line
 }
 function Update-Progress($State) {
     $line = $null
@@ -134,11 +91,12 @@ $ui.BtnConnect.Add_Click({
             } -OnDone {
                 param($result, $err)
                 $ui.BtnConnect.IsEnabled = $true
-                if ($err) { $script:Share = $null; $ui.BtnPublish.IsEnabled = $false; $ui.TxtShareState.Text = 'Nicht erreichbar'; Add-Log ('Fehler: ' + $err); return }
+                if ($err) { $script:Share = $null; $ui.BtnPublish.IsEnabled = $false; $ui.TxtShareState.Text = 'Nicht erreichbar'; Set-SmStepState -Ui $ui; Add-Log ('Fehler: ' + $err); return }
                 $r = $result[-1]
                 $script:Share = $r.Share
                 $ui.TxtShareState.Text = 'Verbunden: ' + $r.Share.Name
                 $ui.BtnPublish.IsEnabled = $true
+                Set-SmStepState -Ui $ui -Done @(1)
                 $ui.TxtFiles.Text = if (@($r.Files).Count) { (@($r.Files) | ForEach-Object { '{0}  ({1})' -f $_.Name, (Format-SmSize $_.Length) }) -join "`r`n" } else { '(Ordner ist leer)' }
                 $ui.TxtFiles.Visibility = 'Visible'
                 Add-Log ('Verbunden: {0} ({1} Dateien)' -f $r.Share.Name, @($r.Files).Count)
@@ -147,7 +105,7 @@ $ui.BtnConnect.Add_Click({
 
 $ui.BtnPublish.Add_Click({
         if (-not $script:Share) { return }
-        $ui.BtnPublish.IsEnabled = $false; $ui.BoxOneLiner.Visibility = 'Collapsed'; $ui.PrgUpload.Value = 0; $ui.TxtProgress.Text = 'Baue Paket …'
+        $ui.BtnPublish.IsEnabled = $false; $ui.BoxOneLiner.Visibility = 'Collapsed'; Set-SmStepState -Ui $ui -Done @(1); $ui.PrgUpload.Value = 0; $ui.TxtProgress.Text = 'Baue Paket …'
         Add-Log 'Baue das Server-Paket und lege es im Tauschordner ab'
         $out = Join-Path $env:TEMP 'ServerMigration-Berater'   # nur das Paket, der Einzeiler wird nie in eine Datei geschrieben
         [void](Start-SmJob -Modules $jobModules -Params @{ Share = $script:Share; Root = $root; Out = $out } -OnTick { param($s) Update-Progress $s } -Script {
@@ -159,15 +117,19 @@ $ui.BtnPublish.Add_Click({
                 if ($err) { $ui.TxtProgress.Text = 'Fehlgeschlagen'; Add-Log ('Fehler: ' + $err); return }
                 $r = $result[-1]
                 $ui.TxtProgress.Text = 'Fertig'
-                $ui.TxtOneLiner.Text = $r.OneLiner
-                $ui.TxtSha.Text = 'SHA256 ' + $r.Package.Sha256
+                Set-SmOneLiner -Ui $ui -Text $r.OneLiner
+                Set-SmHashChip -Text $ui.TxtSha -Sha $r.Package.Sha256
+                Set-SmStepState -Ui $ui -Done @(1, 2)
                 $ui.BoxOneLiner.Visibility = 'Visible'
                 Add-Log ('Paket im Tauschordner: {0} ({1}), SHA256 {2}' -f $r.Remote.Name, (Format-SmSize $r.Remote.Length), $r.Package.Sha256)
             })
     })
 
 $ui.BtnCopy.Add_Click({
-        if ($ui.TxtOneLiner.Text) { [System.Windows.Clipboard]::SetText($ui.TxtOneLiner.Text); Show-SmToast 'Einzeiler kopiert.' }
+        if ($ui.TxtOneLiner.Text) { [System.Windows.Clipboard]::SetText($ui.TxtOneLiner.Text); Show-SmCopied -Button $ui.BtnCopy -Text 'Kopiert'; Set-SmStepState -Ui $ui -Done @(1, 2, 3) }
+    })
+$ui.BtnCopySha.Add_Click({
+        if ($ui.TxtSha.Tag) { [System.Windows.Clipboard]::SetText([string]$ui.TxtSha.Tag); Show-SmCopied -Button $ui.BtnCopySha }
     })
 
 # aktives Projekt: sein Tauschordner-Link kommt in die Seite Tauschordner (verbunden wird per Klick)

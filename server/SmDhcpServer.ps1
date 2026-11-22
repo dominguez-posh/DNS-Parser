@@ -690,7 +690,7 @@ function Register-SmDhcpServerPage {
             $noLeases = [bool]$u.ChkDhcpNoLeases.IsChecked
             $msg = Get-SmDhcpExportText -NoLeases:$noLeases
             if ([System.Windows.MessageBox]::Show($msg, 'DHCP exportieren', 'YesNo', 'Question') -ne 'Yes') { & $c.AddLog 'DHCP-Export abgebrochen.'; return }
-            $u.BtnDhcpExport.IsEnabled = $false; $u.BtnDhcpCopySha.IsEnabled = $false; $c.LastSha = $null; $u.PrgDhcpExport.Value = 0; $u.PrgDhcpExport.Visibility = 'Visible'; $u.TxtDhcpExport.Text = 'Exportiere ...'; $u.TxtDhcpExportSha.Text = ''
+            $u.BtnDhcpExport.IsEnabled = $false; $u.BtnDhcpCopySha.IsEnabled = $false; $c.LastSha = $null; $u.PrgDhcpExport.Value = 0; $u.PrgDhcpExport.Visibility = 'Visible'; $u.TxtDhcpExport.Text = 'Exportiere ...'; Set-SmHashChip -Text $u.TxtDhcpExportSha -Sha ''
             # Arbeitsordner hier anlegen, damit das Fenster ihn beim Schliessen aufraeumen kann
             try { if ($c.ExportDir) { Remove-SmDhcpWorkDir -Dir $c.ExportDir }; $c.ExportDir = New-SmDhcpWorkDir -Kind Export }
             catch { $c.ExportDir = $null; $u.BtnDhcpExport.IsEnabled = $true; $u.TxtDhcpExport.Text = 'Fehlgeschlagen'; & $c.AddLog ('DHCP-Export: Arbeitsordner nicht moeglich: ' + $_.Exception.Message); return }
@@ -705,13 +705,13 @@ function Register-SmDhcpServerPage {
                     $c2.Ui.TxtDhcpExport.Text = 'Fertig: ' + $r.Name
                     $c2.LastSha = [string]$r.Sha256
                     $c2.Ui.BtnDhcpCopySha.IsEnabled = $true
-                    $c2.Ui.TxtDhcpExportSha.Text = 'SHA256 ' + $r.Sha256 + '   (mit "SHA256 kopieren" holen und am neuen Server einfuegen)'
+                    Set-SmHashChip -Text $c2.Ui.TxtDhcpExportSha -Sha $r.Sha256
                 })
         })
     $Ui.BtnDhcpCopySha.Add_Click({
             $c = $script:SmDhcpSrv
             if (-not $c.LastSha) { return }
-            try { [System.Windows.Clipboard]::SetText($c.LastSha); & $c.AddLog 'DHCP: SHA256 des Exports in die Zwischenablage kopiert.' }
+            try { [System.Windows.Clipboard]::SetText($c.LastSha); Show-SmCopied -Button $c.Ui.BtnDhcpCopySha; & $c.AddLog 'DHCP: SHA256 des Exports in die Zwischenablage kopiert.' }
             catch { & $c.AddLog ('DHCP: Kopieren fehlgeschlagen: ' + $_.Exception.Message) }
         })
 

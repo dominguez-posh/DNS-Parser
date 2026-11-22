@@ -1,0 +1,73 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
+    <!-- Seite "Tauschordner" im Berater-Tool: drei Schritte mit Statusanzeige. Logik: Start-ServerMigration.ps1, Bausteine: Modules\SmUi.ps1. Regeln: docs\DESIGN.md -->
+    <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
+        <TextBlock Text="Tauschordner und Server-Paket" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Der Tauschordner ist ein SharePoint- oder OneDrive-Ordner, der mit 'Jeder mit dem Link kann bearbeiten' geteilt ist. Darüber kommt das Server-Paket zum Kunden und kommen Ergebnisse zurück."/>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <Border x:Name="BdgStep1" Style="{DynamicResource StepBadge}"><TextBlock x:Name="TxtStep1" Text="1" Style="{DynamicResource StepNumber}"/></Border>
+                    <TextBlock Text="Tauschordner verbinden" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Style="{DynamicResource Hint}" Margin="36,6,0,10" Text="Freigabelink des Ordners einfügen. Ablaufdatum setzen und den Link nach dem Projekt löschen."/>
+                <TextBox x:Name="TxtLink" Padding="8,6" AutomationProperties.Name="Freigabelink des Tauschordners"/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="BtnConnect" Content="Verbinden" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
+                    <TextBlock x:Name="TxtShareState" Text="Nicht verbunden" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
+                </StackPanel>
+                <TextBox x:Name="TxtFiles" Style="{DynamicResource CodeBox}" Margin="0,12,0,0" MaxHeight="120" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" Visibility="Collapsed"/>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <Border x:Name="BdgStep2" Style="{DynamicResource StepBadge}"><TextBlock x:Name="TxtStep2" Text="2" Style="{DynamicResource StepNumber}"/></Border>
+                    <TextBlock Text="Server-Paket ablegen" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Style="{DynamicResource Hint}" Margin="36,6,0,10" Text="Baut das Paket für das Server-Fenster, legt es im Tauschordner ab (große Dateien in Teilen) und erzeugt den Einzeiler mit Prüfsumme."/>
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="BtnPublish" Content="Paket ablegen" Style="{DynamicResource PrimaryButton}" IsEnabled="False" Margin="0,0,12,0"/>
+                    <TextBlock x:Name="TxtProgress" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
+                </StackPanel>
+                <ProgressBar x:Name="PrgUpload" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
+            </StackPanel>
+        </Border>
+
+        <Border x:Name="BoxOneLiner" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16" Visibility="Collapsed">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <Border x:Name="BdgStep3" Style="{DynamicResource StepBadge}"><TextBlock x:Name="TxtStep3" Text="3" Style="{DynamicResource StepNumber}"/></Border>
+                    <TextBlock Text="Einzeiler für den Server" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Style="{DynamicResource Hint}" Margin="36,6,0,12" Text="Auf dem Server in einer PowerShell einfügen (Administrator). Stimmt die Prüfsumme nicht, wird nichts ausgeführt. Die Skriptfreigabe gilt nur für diesen PowerShell-Prozess."/>
+                <Border Style="{DynamicResource WarnBand}" Margin="0,0,0,14">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Left" Style="{DynamicResource BandGlyph}" Foreground="{DynamicResource Warning}" Text="&#xE7BA;"/>
+                        <TextBlock Style="{DynamicResource BandText}" Text="Link mit kurzem Ablaufdatum anlegen und nach dem Projekt löschen."/>
+                    </DockPanel>
+                </Border>
+
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="BtnCopy" Content="Einzeiler kopieren" Tag="&#xE8C8;" Style="{DynamicResource PrimaryLarge}" MinWidth="200" Margin="0,0,16,0"/>
+                    <Border Style="{DynamicResource Chip}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="SHA256" Style="{DynamicResource ChipLabel}"/>
+                            <TextBlock x:Name="TxtSha" Style="{DynamicResource ChipValue}"/>
+                            <Button x:Name="BtnCopySha" Content="&#xE8C8;" Style="{DynamicResource ChipIconButton}" ToolTip="Prüfsumme kopieren (vollständig)" AutomationProperties.Name="Prüfsumme kopieren"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <Border x:Name="BoxCmdPreview" Style="{DynamicResource CodeLine}" Margin="0,14,0,0">
+                    <TextBlock x:Name="TxtOneLinerPreview" Style="{DynamicResource CodeText}" AutomationProperties.Name="Vorschau des Einzeilers"/>
+                </Border>
+                <Button x:Name="BtnCmdToggle" Content="Befehl anzeigen" Style="{DynamicResource LinkButton}" Margin="2,8,0,0"/>
+                <TextBox x:Name="TxtOneLiner" Style="{DynamicResource CodeBox}" Margin="0,8,0,0" MaxHeight="160" Visibility="Collapsed" AutomationProperties.Name="Einzeiler für den Server"/>
+            </StackPanel>
+        </Border>
+
+        <!--PROTOKOLL-->
+    </StackPanel>
+</ScrollViewer>

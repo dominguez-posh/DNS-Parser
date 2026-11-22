@@ -23,6 +23,7 @@ $ToolVersion = '0.1.0'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $root 'Modules\SmTheme.ps1')
 . (Join-Path $root 'Modules\SmShell.ps1')
+. (Join-Path $root 'Modules\SmUi.ps1')
 . (Join-Path $root 'Modules\SmTausch.ps1')
 . (Join-Path $root 'server\SmDnsServer.ps1')
 . (Join-Path $root 'Modules\SmDhcp.ps1')
@@ -42,8 +43,11 @@ $startPage = @'
     <StackPanel Margin="40,32,40,28" MaxWidth="900" HorizontalAlignment="Left">
         <TextBlock Text="Dieser Server" Style="{DynamicResource PageTitle}"/>
         <TextBlock x:Name="TxtServer" Style="{DynamicResource Subtitle}"/>
-        <Border x:Name="BoxAdmin" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="16,10" Visibility="Collapsed">
-            <TextBlock Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Text="Dieses Fenster läuft nicht als Administrator. Für Änderungen bitte PowerShell mit 'Als Administrator ausführen' öffnen und den Einzeiler erneut einfügen."/>
+        <Border x:Name="BoxAdmin" Style="{DynamicResource WarnBand}" Margin="0,16,0,0" Visibility="Collapsed">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Style="{DynamicResource BandGlyph}" Foreground="{DynamicResource Warning}" Text="&#xE7BA;"/>
+                <TextBlock Style="{DynamicResource BandText}" Text="Dieses Fenster läuft nicht als Administrator. Für Änderungen bitte PowerShell mit 'Als Administrator ausführen' öffnen und den Einzeiler erneut einfügen."/>
+            </DockPanel>
         </Border>
 
         <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
@@ -53,7 +57,7 @@ $startPage = @'
                     <Button x:Name="BtnRefresh" Content="Ordner prüfen" Tag="&#xE72C;" Style="{DynamicResource PrimaryButton}" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtShareState" Text="Kein Tauschordner (nur lokal)" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
                 </StackPanel>
-                <TextBox x:Name="TxtFiles" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" MaxHeight="140" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" Visibility="Collapsed"/>
+                <TextBox x:Name="TxtFiles" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" MaxHeight="140" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" Visibility="Collapsed"/>
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                     <Button x:Name="BtnUpload" Content="Datei hochladen …" Tag="&#xE898;" IsEnabled="False" Margin="0,0,12,0"/>
                     <TextBlock x:Name="TxtProgress" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
@@ -62,12 +66,12 @@ $startPage = @'
             </StackPanel>
         </Border>
 
-        <TextBlock Text="Protokoll" Style="{DynamicResource FieldLabel}" Margin="0,20,0,6"/>
-        <TextBox x:Name="TxtLog" Style="{DynamicResource SelectableText}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" MaxHeight="220" VerticalScrollBarVisibility="Auto" FontSize="12"/>
+        <!--PROTOKOLL-->
     </StackPanel>
 </ScrollViewer>
 '@
 
+$startPage = $startPage.Replace('<!--PROTOKOLL-->', (Get-SmLogCardXaml))
 $pages = @(
     @{ Key = 'Start'; Title = 'Dieser Server'; Glyph = 0xE977; Xaml = $startPage }
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\DnsServer.xaml'), [Text.Encoding]::UTF8) }
@@ -77,19 +81,21 @@ $pages = @(
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Server-Fenster' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
 $ui = $w.Ui
-Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'TxtFiles', 'BtnUpload', 'TxtProgress', 'PrgUpload', 'TxtLog',
+Test-SmWindowNames @('TxtServer', 'BoxAdmin', 'BtnRefresh', 'TxtShareState', 'TxtFiles', 'BtnUpload', 'TxtProgress', 'PrgUpload',
     'TxtDnsState', 'TxtDnsDetail', 'BtnDnsRefresh', 'BoxDnsEnable', 'TxtDnsPath', 'TxtDnsMax', 'BtnDnsEnable', 'BoxDnsOn', 'BtnDnsDisable', 'BoxDnsLogs', 'TxtDnsLogInfo', 'BtnDnsUpload', 'TxtDnsProgress', 'PrgDns',
     'NavStart', 'NavDNS', 'NavDHCP', 'NavPrint', 'NavAD', 'BtnTheme', 'BtnMinimize', 'BtnMaximize', 'BtnClose', 'NavList', 'PageHost')
 Test-SmWindowNames @('BtnDhcpCheck', 'TxtDhcpCheck', 'BtnDhcpExport', 'TxtDhcpExport', 'PrgDhcpExport', 'TxtDhcpExportSha', 'ChkDhcpNoLeases', 'BtnDhcpCopySha', 'ChkDhcpAfterNoLeases', 'TxtDhcpShaIn', 'TxtDhcpShaState', 'BtnDhcpFind', 'BtnDhcpDownload', 'LstDhcpExports', 'TxtDhcpDlSha', 'BtnDhcpOpen',
     'BoxDhcpImport', 'TxtDhcpInfo', 'RdoDhcpAll', 'RdoDhcpSel', 'LstDhcpScopes', 'ChkDhcpLeases', 'BtnDhcpImport', 'TxtDhcpImport', 'BtnDhcpAuth', 'TxtDhcpAuth', 'BtnDhcpAfter', 'TxtDhcpAfter', 'BtnDhcpOldList', 'LstDhcpOldScopes', 'BtnDhcpDeactivate')
+Test-SmWindowNames (Get-SmLogUiNames)
+Initialize-SmLog -Ui $ui
+Initialize-SmCodeBoxes -Ui $ui
 Test-SmWindowNames (Get-SmPrintServerUiNames)
 Test-SmWindowNames (Get-SmAdServerUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
 
 $script:Share = $null
 function Add-Log([string]$Line) {
-    $ui.TxtLog.AppendText(('{0:HH:mm:ss}  {1}' -f (Get-Date), $Line) + "`r`n")
-    $ui.TxtLog.ScrollToEnd()
+    Add-SmLogLine -Ui $ui -Line $Line
 }
 function Update-Progress($State) {
     if ($State.Total -gt 0) {

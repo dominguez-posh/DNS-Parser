@@ -25,7 +25,7 @@
                 </StackPanel>
                 <TextBlock Text="SHA256 des Exports (am neuen Server vollständig einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,12,0,2"/>
                 <StackPanel Orientation="Horizontal">
-                    <TextBox x:Name="TxtPrExpSha" Style="{DynamicResource SelectableText}" Width="560" Height="44" AcceptsReturn="True" FontFamily="{DynamicResource MonoFont}" FontSize="12" Margin="0,0,8,0" AutomationProperties.Name="SHA256 des Exports"/>
+                    <TextBox x:Name="TxtPrExpSha" Style="{DynamicResource CodeBox}" Width="560" Height="80" Margin="0,0,8,0" TextWrapping="NoWrap" AutomationProperties.Name="SHA256 des Exports"/>
                     <Button x:Name="BtnPrShaCopy" Content="Beide SHA256 kopieren"/>
                 </StackPanel>
             </StackPanel>
@@ -44,9 +44,9 @@
                     <Button x:Name="BtnPrDownload" Content="Herunterladen" Margin="0,0,12,0"/>
                 </StackPanel>
                 <TextBlock Text="SHA256 des Exports vom alten Server (vollständig einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,10,0,2"/>
-                <TextBox x:Name="TxtPrShaIn" Padding="8,6" FontFamily="{DynamicResource MonoFont}" FontSize="12" AutomationProperties.Name="SHA256 des Exports vom alten Server"/>
+                <TextBox x:Name="TxtPrShaIn" Style="{DynamicResource HashInput}" AutomationProperties.Name="SHA256 des Exports vom alten Server"/>
                 <TextBlock Text="SHA256 der Inventur vom alten Server (nur bei gewählter Inventur)" Style="{DynamicResource SmallLabel}" Margin="0,8,0,2"/>
-                <TextBox x:Name="TxtPrInvShaIn" Padding="8,6" FontFamily="{DynamicResource MonoFont}" FontSize="12" AutomationProperties.Name="SHA256 der Inventur vom alten Server"/>
+                <TextBox x:Name="TxtPrInvShaIn" Style="{DynamicResource HashInput}" AutomationProperties.Name="SHA256 der Inventur vom alten Server"/>
                 <TextBlock x:Name="TxtPrSha" Foreground="{DynamicResource MutedText}" Margin="0,4,0,0" Text="Noch nichts heruntergeladen."/>
                 <CheckBox x:Name="ChkPrShares" Content="Freigaben übernehmen" IsChecked="True" Margin="0,10,0,0"/>
                 <CheckBox x:Name="ChkPrPublish" Content="Im Active Directory veröffentlichen (wie auf dem alten Server)" Margin="0,6,0,0"/>
@@ -76,7 +76,12 @@
                     <TextBox x:Name="TxtPrDays" Width="70" Padding="6,4" Margin="0,0,12,0" AutomationProperties.Name="Tage zurück"/>
                     <Button x:Name="BtnPrCollect" Content="Zugriffe sammeln" Style="{DynamicResource PrimaryButton}"/>
                 </StackPanel>
-                <TextBlock Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Margin="0,10,0,0" Text="Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten."/>
+                <Border Style="{DynamicResource WarnBand}" Margin="0,10,0,0">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Left" Style="{DynamicResource BandGlyph}" Foreground="{DynamicResource Warning}" Text="&#xE7BA;"/>
+                        <TextBlock Style="{DynamicResource BandText}" Text="Datenschutz: Benutzer- und Rechnernamen aus Ereignis 307 sind personenbezogene Daten."/>
+                    </DockPanel>
+                </Border>
                 <CheckBox x:Name="ChkPrPseudo" Content="Benutzernamen pseudonymisieren (HMAC-SHA256 mit zufälligem Schlüssel)" Margin="0,8,0,0"/>
                 <CheckBox x:Name="ChkPrPseudoClient" Content="Rechnernamen auch pseudonymisieren" Margin="0,6,0,0"/>
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
@@ -103,6 +108,6 @@
         </Border>
 
         <TextBlock Text="Ergebnis der Vorprüfung und Aktion" Style="{DynamicResource FieldLabel}" Margin="0,20,0,6"/>
-        <TextBox x:Name="TxtPrCheck" Style="{DynamicResource SelectableText}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="200" VerticalScrollBarVisibility="Auto" FontSize="12"/>
+        <TextBox x:Name="TxtPrCheck" Style="{DynamicResource CodeBox}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="200" VerticalScrollBarVisibility="Auto" FontSize="12"/>
     </StackPanel>
 </ScrollViewer>

@@ -9,7 +9,7 @@
                 <TextBlock Text="Vorprüfung" Style="{DynamicResource CardTitle}"/>
                 <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Prüft Rolle und Modul DhcpServer, Administrator und die Autorisierung in AD. Ändert nichts."/>
                 <Button x:Name="BtnDhcpCheck" Content="Vorprüfung" Tag="&#xE72C;" Style="{DynamicResource PrimaryButton}" HorizontalAlignment="Left"/>
-                <TextBox x:Name="TxtDhcpCheck" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto" FontSize="12"/>
+                <TextBox x:Name="TxtDhcpCheck" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto" FontSize="12"/>
             </StackPanel>
         </Border>
 
@@ -23,8 +23,13 @@
                     <TextBlock x:Name="TxtDhcpExport" VerticalAlignment="Center" Foreground="{DynamicResource MutedText}"/>
                 </StackPanel>
                 <ProgressBar x:Name="PrgDhcpExport" Style="{DynamicResource ThinProgress}" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-                <TextBox x:Name="TxtDhcpExportSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" TextWrapping="Wrap"/>
-                <Button x:Name="BtnDhcpCopySha" Content="SHA256 kopieren" IsEnabled="False" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                <Border Style="{DynamicResource Chip}" Margin="0,12,0,0" Visibility="Collapsed">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="SHA256" Style="{DynamicResource ChipLabel}"/>
+                        <TextBlock x:Name="TxtDhcpExportSha" Style="{DynamicResource ChipValue}"/>
+                        <Button x:Name="BtnDhcpCopySha" Content="&#xE8C8;" Style="{DynamicResource ChipIconButton}" IsEnabled="False" ToolTip="SHA256 kopieren (vollständig), am neuen Server einfügen" AutomationProperties.Name="SHA256 kopieren"/>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </Border>
 
@@ -39,9 +44,9 @@
                 <ListBox x:Name="LstDhcpExports" Style="{DynamicResource PlainList}" MaxHeight="100" Margin="0,8,0,0" AutomationProperties.Name="DHCP-Exporte im Tauschordner">
                     <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Margin="8,4" Foreground="{DynamicResource Text}"/></DataTemplate></ListBox.ItemTemplate>
                 </ListBox>
-                <TextBox x:Name="TxtDhcpDlSha" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" FontFamily="{DynamicResource MonoFont}" FontSize="12" TextWrapping="Wrap"/>
-                <TextBlock Text="SHA256 vom alten Server (dort mit „SHA256 kopieren“ holen und hier einfügen)" Style="{DynamicResource Hint}" Margin="0,8,0,2" TextWrapping="Wrap"/>
-                <TextBox x:Name="TxtDhcpShaIn" IsEnabled="False" FontFamily="{DynamicResource MonoFont}" FontSize="12" MaxLength="200" AutomationProperties.Name="SHA256 vom alten Server"/>
+                <TextBlock x:Name="TxtDhcpDlSha" Style="{DynamicResource Hint}" Margin="0,10,0,0"/>
+                <TextBlock Text="SHA256 vom alten Server (dort mit dem Kopier-Symbol holen und hier einfügen)" Style="{DynamicResource SmallLabel}" Margin="0,12,0,2" TextWrapping="Wrap"/>
+                <TextBox x:Name="TxtDhcpShaIn" Style="{DynamicResource HashInput}" IsEnabled="False" AutomationProperties.Name="SHA256 vom alten Server"/>
                 <TextBlock x:Name="TxtDhcpShaState" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                 <Button x:Name="BtnDhcpOpen" Content="Export prüfen und Bereiche laden" IsEnabled="False" HorizontalAlignment="Left" Margin="0,8,0,0"/>
 

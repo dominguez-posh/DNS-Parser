@@ -14,7 +14,7 @@
                     <Button x:Name="BtnAdrShow" Content="Anzeigen"/>
                 </StackPanel>
                 <TextBlock x:Name="TxtAdrState" Foreground="{DynamicResource MutedText}" Margin="0,10,0,0"/>
-                <TextBox x:Name="TxtAdrReport" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="200" MaxHeight="480" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
+                <TextBox x:Name="TxtAdrReport" Style="{DynamicResource CodeBox}" Margin="0,10,0,0" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="200" MaxHeight="480" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
                 <Button x:Name="BtnAdrExport" Content="DC-Tabelle exportieren (CSV/Excel) …" IsEnabled="False" HorizontalAlignment="Left" Margin="0,10,0,0"/>
             </StackPanel>
         </Border>

@@ -695,7 +695,7 @@ function Initialize-SmPrintServerPage {
     $Ui.RbPrOld.Add_Checked({ Update-SmPrintRole }); $Ui.RbPrNew.Add_Checked({ Update-SmPrintRole })
     $Ui.BtnPrCheckExp.Add_Click({ Show-SmPrintPrecheck -Mode Export })
     $Ui.BtnPrExport.Add_Click({ Start-SmPrintExportUi })
-    $Ui.BtnPrShaCopy.Add_Click({ $t = $script:SmPS.Ui.TxtPrExpSha.Text; if ($t) { [System.Windows.Clipboard]::SetText($t); Show-SmToast 'Beide SHA256 kopiert.' } })
+    $Ui.BtnPrShaCopy.Add_Click({ $t = $script:SmPS.Ui.TxtPrExpSha.Text; if ($t) { [System.Windows.Clipboard]::SetText($t); Show-SmCopied -Button $script:SmPS.Ui.BtnPrShaCopy } })
     $Ui.BtnPrListShare.Add_Click({ Update-SmPrintShareLists })
     $Ui.BtnPrDownload.Add_Click({ Start-SmPrintDownloadUi })
     $Ui.TxtPrShaIn.Add_TextChanged({ Update-SmPrintImportState }); $Ui.TxtPrInvShaIn.Add_TextChanged({ Update-SmPrintImportState })
@@ -897,7 +897,7 @@ function Start-SmPrintInventoryUi {
         New-SmPrintInventoryFile -Role $P.Role
     } -OnResult {
         param($r)
-        $script:SmPS.Ui.TxtPrCheck.Text = ("Inventur: {0} ({1})`r`nSHA256 {2}" -f $r.Name, (Format-SmSize $r.Length), $r.Sha256)
+        $script:SmPS.Ui.TxtPrCheck.Text = ("Inventur: {0} ({1})`r`nSHA256 {2}" -f $r.Name, (Format-SmSize $r.Length), (Format-SmShortHash $r.Sha256)); $script:SmPS.Ui.TxtPrUploadState.ToolTip = 'SHA256 (vollständig): ' + $r.Sha256
         Update-SmPrintLocalList
     }
 }
@@ -925,7 +925,7 @@ function Start-SmPrintUploadUi {
         Send-SmPrintFile -Share $P.Share -Name $P.Name
     } -OnResult {
         param($r)
-        $script:SmPS.Ui.TxtPrUploadState.Text = ('Hochgeladen: {0} ({1}), SHA256 {2}' -f $r.Name, (Format-SmSize $r.Length), $r.Sha256)
+        $script:SmPS.Ui.TxtPrUploadState.Text = ('Hochgeladen: {0} ({1}), SHA256 {2}' -f $r.Name, (Format-SmSize $r.Length), (Format-SmShortHash $r.Sha256)); $script:SmPS.Ui.TxtPrUploadState.ToolTip = 'SHA256 (vollständig): ' + $r.Sha256
     }
 }
 
