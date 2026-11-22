@@ -29,9 +29,11 @@ $root = $PSScriptRoot
 . (Join-Path $root 'Modules\SmDns.ps1')
 . (Join-Path $root 'Modules\SmDnsUi.ps1')
 . (Join-Path $root 'Modules\SmDhcp.ps1')
+. (Join-Path $root 'Modules\SmPrint.ps1')
 $jobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPaket.ps1'), (Join-Path $root 'Modules\SmProjekte.ps1'))
 $dnsJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmExport.ps1'), (Join-Path $root 'Modules\SmDns.ps1'))
 $dhcpJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmDhcp.ps1'))
+$printJobModules = @((Join-Path $root 'Modules\SmTausch.ps1'), (Join-Path $root 'Modules\SmPrint.ps1'))
 
 $startPage = @'
 <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
@@ -88,7 +90,7 @@ $pages = @(
     @{ Key = 'Projekte'; Title = 'Projekte'; Glyph = 0xE8F1; Xaml = (Get-SmProjectPageXaml -Root $root) }
     @{ Key = 'DNS'; Title = 'DNS'; Glyph = 0xE774; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\Dns.xaml'), [Text.Encoding]::UTF8) }
     @{ Key = 'DHCP'; Title = 'DHCP'; Glyph = 0xE839; Xaml = [IO.File]::ReadAllText((Join-Path $root 'UI\Dhcp.xaml'), [Text.Encoding]::UTF8) }
-    @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Phase = 5; Text = 'Drucker, Treiber und Ports exportieren und importieren, Zugriffe auswerten.' }
+    @{ Key = 'Print'; Title = 'Print'; Glyph = 0xE749; Xaml = (Get-SmPrintPageXaml -Root $root) }
     @{ Key = 'AD'; Title = 'Active Directory'; Glyph = 0xE77B; Phase = 6; Text = 'FSMO-Rollen, DSRM-Kennwort, Funktionsebenen und Schema mit Vorprüfungen.' }
 )
 $w = New-SmWindow -Root $root -Title 'Server-Migration' -Subtitle 'Berater-Tool' -Version ('Version ' + $ToolVersion) -Pages $pages -Theme $Theme
@@ -100,6 +102,7 @@ Test-SmWindowNames @('BtnDhcpFind', 'BtnDhcpCompare', 'BtnDhcpExport', 'CmbDhcpB
 Test-SmWindowNames (Get-SmProjectUiNames)
 $script:Share = $null
 Register-SmDnsPage -Ui $ui -JobModules $dnsJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
+Test-SmWindowNames (Get-SmPrintPageUiNames)
 if ($ParseOnly) { 'PARSE OK'; return }
 
 function Add-Log([string]$Line) {
@@ -171,5 +174,7 @@ Initialize-SmProjectPage -Ui $ui -JobModules $jobModules -AddLog ${function:Add-
 }
 
 Register-SmDhcpPage -Ui $ui -JobModules $dhcpJobModules -GetShare { $script:Share } -AddLog { param($m) Add-Log $m }
+Initialize-SmPrintPage -Ui $ui -JobModules $printJobModules -AddLog ${function:Add-Log} -GetShare { $script:Share }
+
 Select-SmPage 'Start'
 [void]$w.Window.ShowDialog()

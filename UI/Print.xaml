@@ -1,0 +1,70 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{DynamicResource PageScroll}">
+    <!-- Seite "Print" im Berater-Tool (Phase 5). Logik: Modules\SmPrint.ps1 -->
+    <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+        <TextBlock Text="Print" Style="{DynamicResource PageTitle}"/>
+        <TextBlock Style="{DynamicResource Subtitle}" Text="Inventuren von altem und neuem Druckserver vergleichen und die Druckzugriffe auswerten: wer druckt wo, welche Drucker sind ungenutzt."/>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,20,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="1  Daten laden" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Datei in der Liste wählen (Tauschordner) und mit einem der Knöpfe laden. Ohne Auswahl öffnet sich ein Dateidialog für eine lokale Datei. Zugriffsdateien lassen sich mehrfach hinzufügen, Doppelte werden entfernt."/>
+                <Button x:Name="BtnPbRefresh" Content="Print-Dateien im Tauschordner anzeigen" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <ListBox x:Name="LstPbShare" Style="{DynamicResource PlainList}" MaxHeight="150" AutomationProperties.Name="Print-Dateien im Tauschordner"/>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="BtnPbOld" Content="Als alte Inventur laden" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPbNew" Content="Als neue Inventur laden" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPbEvents" Content="Zugriffe hinzufügen" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPbClear" Content="Alles verwerfen" Style="{DynamicResource LinkButton}"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtPbLoaded" Foreground="{DynamicResource MutedText}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="2  Vergleich alt und neu" Style="{DynamicResource CardTitle}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button x:Name="BtnPbCompare" Content="Vergleichen" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPbCompareExport" Content="Exportieren …"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtPbCompareSummary" Foreground="{DynamicResource MutedText}" Margin="0,10,0,8" TextWrapping="Wrap"/>
+                <DataGrid x:Name="GrdPbCompare" IsReadOnly="True" AutoGenerateColumns="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" MaxHeight="320"
+                          Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" RowBackground="{DynamicResource Card}" AlternatingRowBackground="{DynamicResource Card}"
+                          BorderBrush="{DynamicResource Border}" HorizontalGridLinesBrush="{DynamicResource Divider}" AutomationProperties.Name="Ergebnis des Vergleichs">
+                    <DataGrid.ColumnHeaderStyle>
+                        <Style TargetType="DataGridColumnHeader">
+                            <Setter Property="Background" Value="{DynamicResource Surface}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                            <Setter Property="Padding" Value="8,4"/>
+                        </Style>
+                    </DataGrid.ColumnHeaderStyle>
+                </DataGrid>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+            <StackPanel>
+                <TextBlock Text="3  Zugriffe auswerten" Style="{DynamicResource CardTitle}"/>
+                <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,8" TextWrapping="Wrap" Text="Ungenutzte Drucker sind Drucker der Inventur ohne Druckauftrag (Ereignis 307) im Zeitraum der Daten. Benutzernamen sind personenbezogene Daten: Für Berichte das Kürzen einschalten."/>
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="CmbPbView" MinWidth="220" Margin="0,0,12,0" AutomationProperties.Name="Ansicht"/>
+                    <Button x:Name="BtnPbUsage" Content="Anzeigen" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPbUsageExport" Content="Exportieren …"/>
+                </StackPanel>
+                <CheckBox x:Name="ChkPbMask" Content="Benutzernamen kürzen (Pseudonyme in Anzeige und Export)" Margin="0,10,0,0"/>
+                <TextBlock x:Name="TxtPbPeriod" Foreground="{DynamicResource MutedText}" Margin="0,10,0,8" TextWrapping="Wrap"/>
+                <DataGrid x:Name="GrdPbUsage" IsReadOnly="True" AutoGenerateColumns="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" MaxHeight="360"
+                          Background="{DynamicResource Card}" Foreground="{DynamicResource Text}" RowBackground="{DynamicResource Card}" AlternatingRowBackground="{DynamicResource Card}"
+                          BorderBrush="{DynamicResource Border}" HorizontalGridLinesBrush="{DynamicResource Divider}" AutomationProperties.Name="Auswertung der Druckzugriffe">
+                    <DataGrid.ColumnHeaderStyle>
+                        <Style TargetType="DataGridColumnHeader">
+                            <Setter Property="Background" Value="{DynamicResource Surface}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                            <Setter Property="Padding" Value="8,4"/>
+                        </Style>
+                    </DataGrid.ColumnHeaderStyle>
+                </DataGrid>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</ScrollViewer>
